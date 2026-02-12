@@ -1,190 +1,165 @@
 import streamlit as st
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.styles import PatternFill, Font
-from openpyxl.utils import get_column_letter
+from openpyxl.styles import PatternFill
+from openpyxl.utils.dataframe import dataframe_to_rows
 from io import BytesIO
 
-# Configuração da Página
-st.set_page_config(page_title="Automação de Bens Móveis", layout="wide")
+st.set_page_config(page_title="Automação VBA -> Python", layout="wide")
+st.title("🛠️ Automação de Bens Móveis (Versão Corrigida)")
 
-st.title("📊 Automação de Planilha de Bens Móveis")
-st.markdown("""
-Esta ferramenta realiza o processamento automático conforme as regras de negócio:
-1. Insere coluna com PROCV da Matriz.
-2. Filtra códigos específicos.
-3. Ordena e totaliza.
-4. Aplica formatação condicional (Vermelho/Azul).
-""")
-
-# --- UPLOAD DOS ARQUIVOS ---
 col1, col2 = st.columns(2)
 with col1:
-    file_target = st.file_uploader("📂 Carregue a Planilha para Processar (.xlsx)", type=["xlsx"])
+    file_target = st.file_uploader("1. Planilha ALVO (.xlsx)", type=["xlsx"])
 with col2:
-    file_matriz = st.file_uploader("📂 Carregue a Planilha MATRIZ (.xlsx)", type=["xlsx"])
+    file_matriz = st.file_uploader("2. Planilha MATRIZ (.xlsx)", type=["xlsx"])
 
-def processar_planilha(target_file, matriz_file):
-    # 1. Preparar a MATRIZ (Simulando o SourceWorkbook)
-    # Lemos a matriz para um dicionário para fazer o "VLOOKUP" muito rápido
-    df_matriz = pd.read_excel(matriz_file)
-    # Assume que a matriz tem colunas A e B. Criamos um dict: {ValorA: ValorB}
-    # O VBA usa: VLOOKUP(B8, MATRIZ!$A$1:$B$47, 2, FALSE)
-    lookup_dict = dict(zip(df_matriz.iloc[:, 0], df_matriz.iloc[:, 1]))
-    
-    # 2. Carregar o arquivo alvo com OpenPyXL (para preservar formatação)
+def converter_para_numero(valor):
+    """Tenta converter qualquer coisa para float, se falhar devolve o original"""
+    try:
+        return float(valor)
+    except (ValueError, TypeError):
+        return valor
+
+def processar_planilha_robusta(target_file, matriz_file):
+    # 1. Carregar a MATRIZ para memória (Pandas é mais seguro para PROCV)
+    df_matriz = pd.read_excel(matriz_file, header=None) # Assume col A e B
+    # Cria dicionário {Chave: Valor} para busca rápida
+    # Força a chave a ser string para garantir match, ou numero. Vamos tentar ambos.
+    matriz_dict = dict(zip(df_matriz.iloc[:, 0], df_matriz.iloc[:, 1]))
+
+    # 2. Carregar o arquivo Excel mantendo formatação (OpenPyXL)
     wb = load_workbook(target_file)
     
-    # Lógica: Inserir a aba MATRIZ no final
-    if "MATRIZ" not in wb.sheetnames:
-        ws_matriz = wb.create_sheet("MATRIZ")
-        # Copiar dados da matriz para esta aba (opcional, apenas para log, como no VBA)
-        for r_idx, row in enumerate(df_matriz.itertuples(index=False), 1):
-            for c_idx, value in enumerate(row, 1):
-                ws_matriz.cell(row=r_idx, column=c_idx, value=value)
-    
-    # Estilos para pintar celulas
+    # Estilos
     fill_red = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
     fill_blue = PatternFill(start_color="0000FF", end_color="0000FF", fill_type="solid")
-    
-    # Loop em todas as abas (Exceto MATRIZ)
+
     for sheet_name in wb.sheetnames:
         if sheet_name == "MATRIZ":
             continue
-        
+            
         ws = wb[sheet_name]
+        last_row_inicial = ws.max_row
         
-        # --- Passo 2: Inserir Coluna A ---
-        ws.insert_cols(1) 
-        # Agora o antigo A virou B, antigo B virou C...
-        
-        # Identificar a última linha real
-        last_row = ws.max_row
-        
-        # Se não tiver dados suficientes (começa na 8), pula
-        if last_row < 8:
+        if last_row_inicial < 8:
             continue
 
-        # --- Passo: Preparar dados para manipulação em massa ---
-        # Leremos os dados da linha 8 para baixo para memória
-        rows_to_process = []
-        rows_indices = []
+        # --- ESTRATÉGIA HÍBRIDA: PANDAS PARA DADOS, OPENPYXL PARA FORMATO ---
         
-        # Iterar de baixo para cima é seguro para deletar, mas aqui vamos reconstruir
-        # Vamos ler linha a linha a partir da 8
-        for row in range(8, last_row + 1):
-            # O antigo B agora é C (devido à inserção da coluna A)
-            # MAS o VBA diz: Inserir coluna A. PROCV busca valor de B (que era o antigo A?).
-            # VBA: ws.Columns("A:A").Insert. VLOOKUP(B8...)
-            # Se eu tinha [CODIGO, NOME]. Insiro A. Fico com [VAZIO, CODIGO, NOME].
-            # O VBA busca B8 (CODIGO). Correto.
-            val_b = ws.cell(row=row, column=2).value # Coluna B
-            
-            # --- Passo 4: Converter B para número ---
-            try:
-                if val_b is not None:
-                    val_b = float(val_b)
-                    ws.cell(row=row, column=2).value = val_b
-            except:
-                pass # Mantém como está se der erro
-            
-            rows_indices.append(row)
-
-        # --- Passos: PROCV, Filtros e Ordenação ---
-        # Devido à complexidade de ordenar linhas inteiras no OpenPyXL mantendo formatação,
-        # a melhor estratégia híbrida é processar as alterações linha a linha in-place quando possível.
+        # 3. Ler os dados da planilha para o Pandas (apenas da linha 8 para baixo)
+        data = []
+        # Iterar apenas sobre as colunas relevantes para leitura inicial (ex: A até Z)
+        # Nota: O VBA insere uma coluna A nova. Então os dados atuais começam na coluna A (que virará B).
+        for row in ws.iter_rows(min_row=8, values_only=True):
+            data.append(list(row))
         
-        # Lista para deletar (de baixo para cima)
-        rows_to_delete = []
+        # Se não tem dados, pula
+        if not data:
+            continue
+            
+        df = pd.DataFrame(data)
         
-        # Valores proibidos
-        valores_excluir = [123110703, 123110402, 44905287] # Convertido para numérico pois convertemos B
-        valores_excluir_str = ["123110703", "123110402", "44905287"]
+        # Ajuste de colunas: O DataFrame cria colunas 0, 1, 2...
+        # A coluna 0 do DF corresponde à coluna A atual do Excel (que virará B)
+        # Vamos garantir que a coluna 0 seja tratada como número para filtros
+        df[0] = df[0].apply(converter_para_numero)
 
-        # Iterar reverso para deletar e aplicar PROCV
-        for i in range(last_row, 7, -1):
-            val_b = ws.cell(row=i, column=2).value
-            
-            # Limpeza e verificação para exclusão
-            val_check = str(val_b).strip().replace('.0', '') 
-            
-            if val_check in valores_excluir_str:
-                ws.delete_rows(i)
-                continue
-            
-            # --- Passo 3: Aplicar PROCV na Coluna A ---
-            # Busca o valor de B no dicionário
-            resultado_procv = lookup_dict.get(val_b, lookup_dict.get(val_check, None)) # Tenta como numero e string
-            if resultado_procv:
-                ws.cell(row=i, column=1).value = resultado_procv
-            else:
-                ws.cell(row=i, column=1).value = "#N/A" # Ou deixe vazio
+        # 4. Filtros de Exclusão (VBA Step 5)
+        # Valores: 123110703, 123110402, 44905287
+        valores_proibidos = [123110703, 123110402, 44905287]
+        df = df[~df[0].isin(valores_proibidos)] # O til (~) inverte a seleção (pega os que NÃO estão na lista)
 
-        # Recalcular last_row após deleções
-        last_row = ws.max_row
+        # 5. Criar a Coluna do PROCV (VBA Step 3)
+        # Vamos criar uma nova coluna e inseri-la na posição 0 do DataFrame
+        def aplicar_vlookup(valor_chave):
+            # Tenta buscar como número, se não der, tenta como string, se não der, retorna #N/A
+            res = matriz_dict.get(valor_chave)
+            if res is None:
+                res = matriz_dict.get(str(valor_chave))
+            return res if res is not None else "#N/A"
+
+        nova_coluna_a = df[0].apply(aplicar_vlookup)
+        df.insert(0, 'Nova_A', nova_coluna_a) # Insere na primeira posição
+
+        # 6. Ordenação (VBA Step 8)
+        # Classificar pela nova coluna A (agora chamada 'Nova_A')
+        df = df.sort_values(by='Nova_A', ascending=True)
+
+        # 7. ESCREVER DE VOLTA NO EXCEL
+        # Primeiro: Inserir a coluna física no Excel para empurrar a formatação
+        ws.insert_cols(1) 
         
-        # --- Passo 8: Ordenar (Simplificado) ---
-        # Ordenar linhas no Excel via Python é complexo se houver formatação mesclada.
-        # Vou pular a ordenação física complexa para garantir que não quebre o layout,
-        # MAS se for crucial, precisaríamos ler tudo para Pandas e reescrever.
-        # Assumindo que a ordenação do VBA é visual, vamos focar nos Totais e Cores que são críticos.
+        # Limpar os dados antigos (das linhas 8 para baixo) para não sobrar lixo
+        # Como inserimos uma coluna, a largura mudou, mas vamos reescrever célula a célula
+        # A maneira mais segura é sobrescrever.
+        
+        rows_to_write = dataframe_to_rows(df, index=False, header=False)
+        
+        # Escrevendo dados processados e ordenados
+        for r_idx, row in enumerate(rows_to_write, 8): # Começa na linha 8
+            for c_idx, value in enumerate(row, 1): # Começa na coluna 1 (A)
+                cell = ws.cell(row=r_idx, column=c_idx)
+                cell.value = value
+                
+                # REPLICAR FORMATAÇÃO DA LINHA 8 ORIGINAL (Opcional, mas bom para manter fontes)
+                # No OpenPyXL isso é complexo, vamos focar no valor correto.
 
-        # --- Passo 6: Totais ---
+        # Atualizar last_row baseada nos novos dados
+        new_last_row = 8 + len(df) - 1
+
+        # Limpar linhas que sobraram abaixo (caso a nova tabela seja menor que a antiga)
+        if new_last_row < ws.max_row:
+            ws.delete_rows(new_last_row + 1, amount=(ws.max_row - new_last_row))
+
+        # 8. Totais e Cores (Pós-Processamento)
         soma_d = 0
-        for i in range(8, last_row + 1):
-            val_d = ws.cell(row=i, column=4).value # Coluna D
+        
+        # Iterar sobre as linhas escritas para formatar e somar
+        for r in range(8, new_last_row + 1):
+            # Converter Coluna B (indice 2) para garantir numero no Excel
+            cell_b = ws.cell(row=r, column=2)
+            if cell_b.value:
+                cell_b.value = converter_para_numero(cell_b.value)
+            
+            # Somar Coluna D (indice 4)
+            cell_d = ws.cell(row=r, column=4)
+            val_d = converter_para_numero(cell_d.value)
+            
+            # Acumular soma se for número
             if isinstance(val_d, (int, float)):
                 soma_d += val_d
-        
-        # Escrever totais
-        ws.cell(row=last_row + 1, column=4).value = soma_d
-        ws.cell(row=last_row + 1, column=4).number_format = '#,##0.00'
-        ws.cell(row=last_row + 1, column=3).value = "TOTAL"
-        
-        # --- Passo 9: Cores Condicionais ---
-        for i in range(8, last_row + 1):
-            val_b = ws.cell(row=i, column=2).value
-            val_d = ws.cell(row=i, column=4).value
             
-            # Normalizar B
-            try:
-                val_b_int = int(float(val_b)) if val_b else 0
-            except:
-                val_b_int = 0
-                
-            tem_valor_d = val_d is not None and val_d != 0
+            # Formatação Condicional (Vermelho/Azul)
+            val_b_check = cell_b.value
             
-            # Vermelho: 123110801
-            if val_b_int == 123110801 and tem_valor_d:
-                for col in range(2, 5): # B(2) até D(4)
-                    ws.cell(row=i, column=col).fill = fill_red
+            # Regra Vermelha: 123110801
+            if val_b_check == 123110801 and val_d != 0:
+                for c in range(2, 5): # B, C, D
+                    ws.cell(row=r, column=c).fill = fill_red
             
-            # Azul: 123119905
-            if val_b_int == 123119905 and tem_valor_d:
-                for col in range(2, 5):
-                    ws.cell(row=i, column=col).fill = fill_blue
+            # Regra Azul: 123119905
+            if val_b_check == 123119905 and val_d != 0:
+                for c in range(2, 5):
+                    ws.cell(row=r, column=c).fill = fill_blue
 
-    # Salvar em memória
+        # Escrever Totais Finais
+        ws.cell(row=new_last_row + 1, column=3).value = "TOTAL" # Coluna C
+        cell_total = ws.cell(row=new_last_row + 1, column=4)    # Coluna D
+        cell_total.value = soma_d
+        cell_total.number_format = '#,##0.00'
+
+    # Salvar
     output = BytesIO()
     wb.save(output)
     output.seek(0)
     return output
 
-# --- BOTÃO DE EXECUÇÃO ---
 if file_target and file_matriz:
-    if st.button("🚀 Processar Planilha"):
-        with st.spinner("Processando..."):
-            try:
-                processed_data = processar_planilha(file_target, file_matriz)
-                st.success("Planilha de Bens Móveis atualizada com êxito!")
-                
-                st.download_button(
-                    label="📥 Baixar Planilha Pronta",
-                    data=processed_data,
-                    file_name="Planilha_Bens_Moveis_Atualizada.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            except Exception as e:
-                st.error(f"Ocorreu um erro: {e}")
-else:
-    st.info("Por favor, faça o upload de ambos os arquivos para começar.")
+    if st.button("🚀 Processar Corretamente"):
+        try:
+            processed = processar_planilha_robusta(file_target, file_matriz)
+            st.success("Concluído! Dados tipados e ordenados.")
+            st.download_button("Baixar Planilha", processed, "Resultado_Final.xlsx")
+        except Exception as e:
+            st.error(f"Erro: {e}")
