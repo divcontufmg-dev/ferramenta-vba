@@ -105,7 +105,7 @@ if st.sidebar.button("Processar Planilhas"):
                 data_rows[0] = pd.to_numeric(data_rows[0], errors='coerce')
                 
                 # Filtro
-                exclusion_list = [123110703, 123110402, 44905287]
+                exclusion_list = [123110703, 123110402, 123119910]
                 data_rows = data_rows[~data_rows[0].isin(exclusion_list)]
 
                 # PROCV
