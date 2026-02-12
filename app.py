@@ -3,6 +3,7 @@ import pandas as pd
 import io
 import xlsxwriter
 import zipfile
+import os
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Processador de Bens Móveis", layout="wide")
@@ -10,18 +11,16 @@ st.set_page_config(page_title="Processador de Bens Móveis", layout="wide")
 st.title("📂 Processador de Planilha de Bens Móveis")
 st.markdown("""
 **Funcionalidades:**
-1. **Processar:** Aplica PROCV, filtros e cores (Vermelho/Azul).
+1. **Processar:** Aplica PROCV (usando MATRIZ.xlsx local), filtros e cores.
 2. **Download Unificado:** Baixa tudo em um único arquivo Excel.
-3. **Download Separado (.zip):** Baixa cada aba como um arquivo Excel individual (substituindo a macro de "Salvar Abas").
+3. **Download Separado (.zip):** Baixa cada aba como um arquivo Excel individual.
 """)
 
 # --- BARRA LATERAL (UPLOADS) ---
 st.sidebar.header("Carregar Arquivos")
-uploaded_file = st.sidebar.file_uploader("1. Carregar Planilha Principal (.xlsx)", type=["xlsx"])
-uploaded_matriz = st.sidebar.file_uploader("2. Carregar Planilha MATRIZ (.xlsx)", type=["xlsx"])
+uploaded_file = st.sidebar.file_uploader("Carregar Planilha Principal (.xlsx)", type=["xlsx"])
 
 # --- FUNÇÃO AUXILIAR DE FORMATAÇÃO ---
-# Esta função aplica as cores e totais. Usamos ela tanto para o arquivo único quanto para os individuais.
 def formatar_aba(writer, sheet_name, data_rows, header_rows):
     # Escreve Cabeçalho (Deslocado 1 coluna para direita)
     header_rows.to_excel(writer, sheet_name=sheet_name, startrow=0, startcol=1, index=False, header=False)
@@ -76,28 +75,29 @@ def formatar_aba(writer, sheet_name, data_rows, header_rows):
 
 # --- PROCESSAMENTO PRINCIPAL ---
 if st.sidebar.button("Processar Planilhas"):
-    if uploaded_file is None or uploaded_matriz is None:
-        st.error("⚠️ Por favor, faça o upload de AMBOS os arquivos.")
+    # Verifica MATRIZ local
+    if not os.path.exists("MATRIZ.xlsx"):
+        st.error("❌ O arquivo 'MATRIZ.xlsx' não foi encontrado no sistema.")
+    elif uploaded_file is None:
+        st.error("⚠️ Por favor, faça o upload da Planilha Principal.")
     else:
         try:
-            # 1. PREPARAÇÃO DOS DADOS (Matriz e PROCV em memória)
-            df_matriz = pd.read_excel(uploaded_matriz, usecols="A:B", header=None)
+            # 1. PREPARAÇÃO DOS DADOS (Lê direto do arquivo local)
+            df_matriz = pd.read_excel("MATRIZ.xlsx", usecols="A:B", header=None)
             df_matriz.columns = ['Chave', 'Descricao']
             df_matriz = df_matriz.drop_duplicates(subset=['Chave'], keep='first')
             lookup_dict = dict(zip(df_matriz['Chave'], df_matriz['Descricao']))
 
             xls_file = pd.ExcelFile(uploaded_file)
             
-            # Lista para armazenar os dados processados antes de salvar
-            # Isso evita ter que reprocessar tudo duas vezes
             processed_sheets = []
 
-            # Loop de Processamento Lógico (sem salvar ainda)
+            # Loop de Processamento
             for sheet_name in xls_file.sheet_names:
                 if sheet_name == "MATRIZ": continue
 
                 df_raw = pd.read_excel(xls_file, sheet_name=sheet_name, header=None)
-                if len(df_raw) < 8: continue # Pula abas vazias
+                if len(df_raw) < 8: continue 
 
                 header_rows = df_raw.iloc[:7]
                 data_rows = df_raw.iloc[7:].copy()
@@ -120,7 +120,6 @@ if st.sidebar.button("Processar Planilhas"):
                 # Ordenar linhas
                 data_rows = data_rows.sort_values(by='Nova_Descricao', ascending=True)
 
-                # Salva na lista para uso posterior
                 processed_sheets.append({
                     'name': sheet_name,
                     'header': header_rows,
@@ -130,10 +129,10 @@ if st.sidebar.button("Processar Planilhas"):
             st.success(f"✅ Processamento concluído! {len(processed_sheets)} abas foram tratadas.")
             st.markdown("---")
 
-            # --- GERAÇÃO 1: ARQUIVO ÚNICO (Consolidado) ---
+            # --- GERAÇÃO 1: ARQUIVO ÚNICO ---
             output_combined = io.BytesIO()
             with pd.ExcelWriter(output_combined, engine='xlsxwriter') as writer:
-                # Salva a MATRIZ primeiro
+                # Opcional: Incluir a Matriz para conferência
                 df_matriz.to_excel(writer, sheet_name='MATRIZ', index=False, header=False)
                 
                 for item in processed_sheets:
@@ -153,17 +152,13 @@ if st.sidebar.button("Processar Planilhas"):
                 )
 
             # --- GERAÇÃO 2: ARQUIVOS SEPARADOS (ZIP) ---
-            # Equivalente à macro "SalvarAbasComoArquivos"
             zip_buffer = io.BytesIO()
-            
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                 for item in processed_sheets:
-                    # Cria um Excel individual em memória para cada aba
                     single_excel_buffer = io.BytesIO()
                     with pd.ExcelWriter(single_excel_buffer, engine='xlsxwriter') as single_writer:
                         formatar_aba(single_writer, item['name'], item['data'], item['header'])
                     
-                    # Salva o Excel dentro do ZIP
                     single_excel_buffer.seek(0)
                     zf.writestr(f"{item['name']}.xlsx", single_excel_buffer.getvalue())
 
@@ -171,7 +166,6 @@ if st.sidebar.button("Processar Planilhas"):
 
             with col2:
                 st.subheader("Opção 2: Abas Separadas")
-                st.caption("Substitui a macro de salvar arquivos individualmente.")
                 st.download_button(
                     label="📦 Baixar Arquivos Separados (.zip)",
                     data=zip_buffer,
