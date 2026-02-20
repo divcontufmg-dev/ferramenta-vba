@@ -14,7 +14,7 @@ from pytesseract import Output
 # CONFIGURAÇÃO INICIAL
 # ==========================================
 st.set_page_config(
-    page_title="Conciliador RMB x SIAFI",
+    page_title="Conciliador Unificado RMB x SIAFI",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -70,7 +70,7 @@ class PDF_Report(FPDF):
 # ==========================================
 st.title("📊 Ferramenta Unificada: Conciliador RMB x SIAFI")
 st.markdown("""
-Faz o processamento (Filtros e Matriz) e a conciliação automática com o PDF lendo **todas as abas da planilha original**, sem necessidade de divisão prévia.
+Lê a planilha completa (todas as abas), aplica os filtros/PROCV da MATRIZ (sem alterar a estrutura) e faz a conciliação automática com o PDF.
 """)
 st.markdown("---")
 
@@ -99,7 +99,7 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
 
         # === 1. LER MATRIZ.XLSX ===
         if not os.path.exists("MATRIZ.xlsx"):
-            st.error("❌ O arquivo 'MATRIZ.xlsx' não foi encontrado na pasta do sistema.")
+            st.error("❌ O arquivo 'MATRIZ.xlsx' não foi encontrado na pasta do sistema (GitHub).")
             st.stop()
             
         try:
@@ -122,8 +122,7 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
             match = re.search(r'(\d+)', aba)
             if match:
                 ug = match.group(1)
-                # Verifica se o UG está no nome do PDF
-                pdf_match = next((f for n, f in pdfs.items() if ug in n), None)
+                pdf_match = next((f for n, f in pdfs.items() if n.startswith(ug)), None)
                 if pdf_match:
                     pares.append({'ug': ug, 'nome_aba': aba, 'pdf': pdf_match})
                 else:
@@ -151,39 +150,40 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
                 saldo_2042 = 0.0
                 tem_2042_com_saldo = False
                 
-                # --- PREPARAÇÃO EXCEL E CONCILIAÇÃO ---
+                # --- PREPARAÇÃO EXCEL (Código 1) + CONCILIAÇÃO (Código 2) ---
                 try:
                     siafi_file.seek(0)
                     df_raw = pd.read_excel(siafi_file, sheet_name=nome_aba, header=None)
                     
                     if len(df_raw) >= 8:
+                        # Extrai os dados a partir da linha 8
                         data_rows = df_raw.iloc[7:].copy()
                         
-                        # Garante que os valores na Coluna A (Índice 0) sejam lidos como números
+                        # [Código 1] Garante que a coluna 0 (Conta) seja número para os filtros
                         data_rows[0] = pd.to_numeric(data_rows[0], errors='coerce')
                         
-                        # [Ferramenta 1] Exclui as contas da lista negra
+                        # [Código 1] Exclui contas
                         exclusion_list = [123110703, 123110402, 123119910]
                         data_rows = data_rows[~data_rows[0].isin(exclusion_list)]
                         
-                        # [Ferramenta 1] Substituição PROCV (Na mesma Coluna C/2, para não bagunçar índices)
-                        data_rows['Nova_Descricao'] = data_rows[0].map(lookup_dict)
-                        mask_found = data_rows['Nova_Descricao'].notna()
-                        data_rows.loc[mask_found, 2] = data_rows.loc[mask_found, 'Nova_Descricao']
+                        # [Código 1 Corrigido] Faz o PROCV e sobrepõe na coluna 2 sem alterar a ordem
+                        desc_mapeada = data_rows[0].map(lookup_dict)
+                        data_rows[2] = desc_mapeada.fillna(data_rows[2])
                         
-                        # [Ferramenta 2] Atribuição exata das colunas lógicas 
+                        # [Código 2] Lê exatamente nas posições esperadas originais: 
+                        # Coluna 0 (Código), Coluna 2 (Descrição), Coluna 3 (Valor)
                         df_calc = pd.DataFrame()
-                        df_calc['Codigo_Limpo'] = data_rows[0].apply(limpar_codigo_bruto) # Coluna A
-                        df_calc['Descricao_Excel'] = data_rows[2].astype(str).str.strip().str.upper() # Coluna C (Já com PROCV)
-                        df_calc['Valor_Limpo'] = data_rows[3].apply(limpar_valor) # Coluna D
+                        df_calc['Codigo_Limpo'] = data_rows[0].apply(limpar_codigo_bruto)
+                        df_calc['Descricao_Excel'] = data_rows[2].astype(str).str.strip().str.upper()
+                        df_calc['Valor_Limpo'] = data_rows[3].apply(limpar_valor)
                         
-                        # Lógica da Conta Estoque 2042
+                        # Captura Conta 2042
                         mask_2042 = df_calc['Codigo_Limpo'] == '2042'
                         if mask_2042.any():
                             saldo_2042 = df_calc.loc[mask_2042, 'Valor_Limpo'].sum()
                             if abs(saldo_2042) > 0.00: tem_2042_com_saldo = True
                         
-                        # Lógica do Conciliador: Apenas contas iniciadas em 449
+                        # Aplica filtro para 449
                         mask_padrao = df_calc['Codigo_Limpo'].str.startswith('449')
                         df_dados = df_calc[mask_padrao].copy()
                         
@@ -193,10 +193,11 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
                             'Descricao_Excel': 'first'
                         }).reset_index()
                         df_padrao.columns = ['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa']
+
                 except Exception as e:
                     logs.append(f"❌ Erro na leitura Excel da UG {ug}: {e}")
 
-                # --- LEITURA DO PDF (MANTIDA INTACTA) ---
+                # --- LEITURA DO PDF (Intacta do Código 2) ---
                 df_pdf_final = pd.DataFrame()
                 dados_pdf = []
                 
@@ -254,7 +255,7 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
                 except Exception as e:
                     logs.append(f"❌ Erro Leitura PDF UG {ug}: {e}")
 
-                # --- COMPARATIVO FINAL ---
+                # --- COMPARATIVO FINAL E RELATÓRIO ---
                 if df_padrao.empty: df_padrao = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa'])
                 if df_pdf_final.empty: df_pdf_final = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_PDF'])
 
