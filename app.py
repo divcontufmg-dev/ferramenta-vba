@@ -14,7 +14,7 @@ from pytesseract import Output
 # CONFIGURAÇÃO INICIAL
 # ==========================================
 st.set_page_config(
-    page_title="Conciliador Unificado: RMB x SIAFI",
+    page_title="Conciliador Unificado RMB x SIAFI",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -59,70 +59,62 @@ def formatar_real(valor):
 class PDF_Report(FPDF):
     def header(self):
         self.set_font('helvetica', 'B', 12)
-        self.cell(0, 10, 'Relatório de Conferência Patrimonial: RMB x SIAFI', align='C', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.cell(0, 10, 'Relatório de conferência patrimonial', align='C', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         self.ln(5)
     def footer(self):
         self.set_y(-15); self.set_font('helvetica', 'I', 8)
         self.cell(0, 10, f'Página {self.page_no()}', align='C')
 
 # ==========================================
-# INTERFACE
+# INTERFACE E PROCESSAMENTO
 # ==========================================
-st.title("📊 Ferramenta Unificada de Conciliação RMB x SIAFI")
+st.title("📊 Ferramenta Unificada: Conciliador RMB x SIAFI")
 st.markdown("""
-Esta ferramenta aplica automaticamente as regras de exclusão e PROCV (utilizando a MATRIZ interna do sistema) na sua folha de cálculo principal e, em seguida, cruza os dados com os PDFs, gerando o relatório final sem a necessidade de descarregar ficheiros intermediários.
+Esta ferramenta processa a **Planilha SIAFI completa (todas as abas)** aplicando as exclusões e PROCV da MATRIZ. Em seguida, já cruza os dados com os PDFs do RMB correspondentes sem precisar dividir a planilha.
+---
 """)
-st.markdown("---")
 
-st.subheader("📂 Área de Ficheiros")
+st.subheader("📂 Área de Arquivos")
 uploaded_files = st.file_uploader(
-    "Arraste a Planilha SIAFI (completa) e os PDFs (RMB):", 
+    "Arraste a Planilha SIAFI (completa) e os arquivos PDF (RMB):", 
     accept_multiple_files=True
 )
 
-if st.button("▶️ Processar e Conciliar", use_container_width=True, type="primary"):
+if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary"):
     
     if not uploaded_files:
-        st.warning("⚠️ Por favor, adicione os ficheiros antes de processar.")
+        st.warning("⚠️ Por favor, adicione os arquivos antes de processar.")
     else:
         progresso = st.progress(0)
         status_text = st.empty()
         logs = []
         
-        # Separa os tipos de ficheiros
+        # Separa a planilha Excel e os PDFs
         pdfs = {f.name: f for f in uploaded_files if f.name.lower().endswith('.pdf')}
         excels = [f for f in uploaded_files if f.name.lower().endswith(('.xlsx', '.xls', '.csv'))]
-        
         siafi_file = next((f for f in excels), None)
 
         if not siafi_file:
-            st.error("❌ Não foi possível identificar a Planilha Principal (SIAFI).")
+            st.error("❌ A Planilha SIAFI não foi anexada. Por favor, inclua o arquivo Excel.")
             st.stop()
 
-        # === 1. CARREGAR A MATRIZ (Automático do Repositório) ===
-        lookup_dict = {}
-        caminho_matriz = "MATRIZ.xlsx"
-        
-        if not os.path.exists(caminho_matriz):
-            st.error("❌ O ficheiro 'MATRIZ.xlsx' não foi encontrado na pasta do sistema (GitHub). Verifique se o mesmo está no repositório.")
+        # === LÊ A MATRIZ LOCAL (Conforme Ferramenta 1) ===
+        if not os.path.exists("MATRIZ.xlsx"):
+            st.error("❌ O arquivo 'MATRIZ.xlsx' não foi encontrado na pasta do sistema (GitHub).")
             st.stop()
             
-        try:
-            df_matriz = pd.read_excel(caminho_matriz, usecols="A:B", header=None)
-            df_matriz.columns = ['Chave', 'Descricao']
-            df_matriz['Chave'] = pd.to_numeric(df_matriz['Chave'], errors='coerce')
-            df_matriz = df_matriz.drop_duplicates(subset=['Chave'], keep='first')
-            lookup_dict = dict(zip(df_matriz['Chave'], df_matriz['Descricao']))
-        except Exception as e:
-            st.error(f"❌ Erro ao ler a MATRIZ interna: {e}")
-            st.stop()
+        df_matriz = pd.read_excel("MATRIZ.xlsx", usecols="A:B", header=None)
+        df_matriz.columns = ['Chave', 'Descricao']
+        df_matriz = df_matriz.drop_duplicates(subset=['Chave'], keep='first')
+        lookup_dict = dict(zip(df_matriz['Chave'], df_matriz['Descricao']))
 
-        # === 2. MAPEAMENTO DE ABAS E PDFs ===
+        # === MAPEIA AS ABAS E OS PDFs ===
         xls_file = pd.ExcelFile(siafi_file)
         pares = []
         
         for aba in xls_file.sheet_names:
             if aba.upper() == "MATRIZ": continue
+            # Procura o número da UG no nome da aba
             match = re.search(r'(\d+)', aba)
             if match:
                 ug = match.group(1)
@@ -130,62 +122,64 @@ if st.button("▶️ Processar e Conciliar", use_container_width=True, type="pri
                 if pdf_match:
                     pares.append({'ug': ug, 'nome_aba': aba, 'pdf': pdf_match})
                 else:
-                    logs.append(f"⚠️ Separador '{aba}' (UG {ug}): Faltando PDF correspondente.")
-        
+                    logs.append(f"⚠️ Aba '{aba}' (UG {ug}): Faltando PDF correspondente.")
+
         if not pares:
-            st.error("❌ Nenhum par completo (Separador do Excel + PDF) foi identificado.")
+            st.error("❌ Nenhum par completo (Aba da Planilha + PDF) foi identificado.")
             st.stop()
-            
+
         pdf_out = PDF_Report()
         pdf_out.add_page()
         
         st.markdown("---")
         st.subheader("🔍 Resultados da Análise")
 
-        # === 3. LOOP DE CONCILIAÇÃO ===
+        # === LOOP DE CONCILIAÇÃO ===
         for idx, par in enumerate(pares):
             ug = par['ug']
             nome_aba = par['nome_aba']
-            status_text.text(f"A processar Separador '{nome_aba}' (UG: {ug})...")
+            status_text.text(f"Processando Aba '{nome_aba}' (UG {ug})...")
             
             with st.container():
-                st.info(f"🏢 **Unidade Gestora: {ug} (Separador: {nome_aba})**")
+                st.info(f"🏢 **Unidade Gestora: {ug} (Aba: {nome_aba})**")
                 
-                # --- PREPARAÇÃO DOS DADOS SIAFI ---
                 df_padrao = pd.DataFrame()
                 saldo_2042 = 0.0
                 tem_2042_com_saldo = False
                 
+                # ==========================================
+                # 1. PROCESSA O EXCEL (UNIÃO FIEL DA F1 E F2)
+                # ==========================================
                 try:
                     siafi_file.seek(0)
                     df_raw = pd.read_excel(siafi_file, sheet_name=nome_aba, header=None)
                     
                     if len(df_raw) >= 8:
                         data_rows = df_raw.iloc[7:].copy()
-                        data_rows[0] = pd.to_numeric(data_rows[0], errors='coerce')
                         
-                        # Aplica Exclusões
+                        # -- Lógica da Ferramenta 1 (Filtro e PROCV) --
+                        data_rows[0] = pd.to_numeric(data_rows[0], errors='coerce')
                         exclusion_list = [123110703, 123110402, 123119910]
                         data_rows = data_rows[~data_rows[0].isin(exclusion_list)]
-                        
-                        # Aplica o PROCV 
                         data_rows['Nova_Descricao'] = data_rows[0].map(lookup_dict)
                         
+                        # -- Lógica da Ferramenta 2 --
                         df = pd.DataFrame()
                         df['Codigo_Limpo'] = data_rows[0].apply(limpar_codigo_bruto)
+                        # Usa a descrição da matriz. Se não tiver, usa a original (Coluna 2)
                         df['Descricao_Excel'] = data_rows['Nova_Descricao'].fillna(data_rows[2]).astype(str).str.strip().str.upper()
+                        # A coluna de valor monetário original ficava na Coluna 3
                         df['Valor_Limpo'] = data_rows[3].apply(limpar_valor)
                         
-                        # Regras de Saldo Interno
+                        # Lógica 2042
                         mask_2042 = df['Codigo_Limpo'] == '2042'
                         if mask_2042.any():
                             saldo_2042 = df.loc[mask_2042, 'Valor_Limpo'].sum()
                             if abs(saldo_2042) > 0.00: tem_2042_com_saldo = True
                         
-                        # Filtra apenas os registos válidos para conciliação
-                        mask_validos = (df['Codigo_Limpo'] != '2042') & (df['Codigo_Limpo'] != '') & (df['Codigo_Limpo'] != 'NAN')
-                        df_dados = df[mask_validos].copy()
-                        
+                        # Regra estrita da Ferramenta 2
+                        mask_padrao = df['Codigo_Limpo'].str.startswith('449')
+                        df_dados = df[mask_padrao].copy()
                         df_dados['Chave_Vinculo'] = df_dados['Codigo_Limpo'].apply(extrair_chave_vinculo)
                         
                         df_padrao = df_dados.groupby('Chave_Vinculo').agg({
@@ -196,7 +190,9 @@ if st.button("▶️ Processar e Conciliar", use_container_width=True, type="pri
                 except Exception as e:
                     logs.append(f"❌ Erro Excel UG {ug}: {e}")
 
-                # --- LEITURA DO PDF RMB ---
+                # ==========================================
+                # 2. PROCESSA O PDF (LÓGICA INTACTA DA F2)
+                # ==========================================
                 df_pdf_final = pd.DataFrame()
                 dados_pdf = []
                 
@@ -210,8 +206,9 @@ if st.button("▶️ Processar e Conciliar", use_container_width=True, type="pri
                             is_ocr = False
                             
                             tem_dados_validos = False
-                            if txt and re.search(r'\d{1,3}(?:[.,]\d{3})*[.,]\d{2}', txt):
-                                tem_dados_validos = True
+                            if txt:
+                                if re.search(r'\d{1,3}(?:[.,]\d{3})*[.,]\d{2}', txt):
+                                    tem_dados_validos = True
                             
                             if not txt or not tem_dados_validos or len(txt) < 50:
                                 is_ocr = True
@@ -254,7 +251,9 @@ if st.button("▶️ Processar e Conciliar", use_container_width=True, type="pri
                 except Exception as e:
                     logs.append(f"❌ Erro Leitura PDF UG {ug}: {e}")
 
-                # --- CRUZAMENTO E COMPARAÇÃO ---
+                # ==========================================
+                # 3. COMPARAÇÃO E RESULTADOS
+                # ==========================================
                 if df_padrao.empty: df_padrao = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa'])
                 if df_pdf_final.empty: df_pdf_final = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_PDF'])
 
@@ -263,14 +262,13 @@ if st.button("▶️ Processar e Conciliar", use_container_width=True, type="pri
                 final['Diferenca'] = (final['Saldo_PDF'] - final['Saldo_Excel']).round(2)
                 divergencias = final[abs(final['Diferenca']) > 0.05].copy()
 
-                # --- EXIBIÇÃO NO DASHBOARD ---
                 soma_pdf = final['Saldo_PDF'].sum()
                 soma_excel = final['Saldo_Excel'].sum()
                 dif_total = soma_pdf - soma_excel
 
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Total RMB (PDF)", f"R$ {soma_pdf:,.2f}")
-                col2.metric("Total SIAFI Tratado", f"R$ {soma_excel:,.2f}")
+                col2.metric("Total SIAFI (Excel)", f"R$ {soma_excel:,.2f}")
                 col3.metric("Diferença", f"R$ {dif_total:,.2f}", delta_color="inverse" if abs(dif_total) > 0.05 else "normal")
                 
                 if not divergencias.empty:
@@ -285,10 +283,12 @@ if st.button("▶️ Processar e Conciliar", use_container_width=True, type="pri
 
                 st.markdown("---")
 
-                # --- CONSTRUÇÃO DO PDF FINAL ---
+                # ==========================================
+                # 4. GERAÇÃO PDF FINAL
+                # ==========================================
                 pdf_out.set_font("helvetica", 'B', 11)
                 pdf_out.set_fill_color(240, 240, 240)
-                pdf_out.cell(0, 10, text=f"Unidade Gestora: {ug} (Separador: {nome_aba})", border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
+                pdf_out.cell(0, 10, text=f"Unidade Gestora: {ug} (Aba: {nome_aba})", border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
                 
                 if not divergencias.empty:
                     pdf_out.set_font("helvetica", 'B', 9)
@@ -341,6 +341,6 @@ if st.button("▶️ Processar e Conciliar", use_container_width=True, type="pri
         
         try:
             pdf_bytes = bytes(pdf_out.output())
-            st.download_button("DESCARREGAR RELATÓRIO DE CONCILIAÇÃO PDF", pdf_bytes, "RELATORIO_FINAL_UNIFICADO.pdf", "application/pdf", type="primary", use_container_width=True)
+            st.download_button("BAIXAR RELATÓRIO FINAL PDF", pdf_bytes, "RELATORIO_FINAL_UNIFICADO.pdf", "application/pdf", type="primary", use_container_width=True)
         except Exception as e:
             st.error(f"Erro ao gerar o PDF: {e}")
