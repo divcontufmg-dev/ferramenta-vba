@@ -53,8 +53,8 @@ def extract_excel_data(df_raw):
         
         val_0 = str(row.iloc[0]).strip().replace('.0', '')
         
-        # O dado que importa sempre começa com 123 ou é o 2042
-        if val_0.startswith('123') or val_0 == '2042':
+        # O dado que importa sempre começa com 123
+        if val_0.startswith('123'):
             codigo = val_0
             desc = "SEM DESCRIÇÃO"
             val = 0.0
@@ -84,7 +84,6 @@ def extract_excel_data(df_raw):
 def get_chave_vinculo(conta, dict_matriz):
     """Traduz o código 123... da planilha no final do código 449... da MATRIZ"""
     conta = str(conta).strip()
-    if conta == '2042': return None
     if conta in dict_matriz:
         val_matriz = str(dict_matriz[conta])
         match = re.search(r'(\d+)$', val_matriz)
@@ -109,7 +108,7 @@ class PDF_Report(FPDF):
 # ==========================================
 # INTERFACE DO USUÁRIO
 # ==========================================
-st.title("📊 Conciliador RMB x SIAFI (Motor Unificado Definitivo)")
+st.title("📊 Conciliador RMB x SIAFI (Motor Unificado)")
 st.markdown("""
 **Funcionamento Inteligente:** Faça o upload da Planilha Principal RAW (várias abas) e os PDFs. O motor traduz internamente as chaves através da MATRIZ lendo os valores exatamente como a ferramenta separada faria.
 """)
@@ -190,24 +189,24 @@ if st.button("🚀 Iniciar Auditoria Unificada", type="primary", use_container_w
                     # LEITURA DO EXCEL (MOTOR DEFINITIVO)
                     # ==========================================
                     df_padrao = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa'])
-                    saldo_2042 = 0.0
-                    tem_2042_com_saldo = False
+                    saldo_estoque = 0.0
+                    tem_estoque_com_saldo = False
                     
                     try:
                         df_raw = pd.read_excel(xls_file, sheet_name=par['sheet_name'], header=None)
                         df_dados = extract_excel_data(df_raw)
                         
                         if not df_dados.empty:
-                            # Filtro Estoque Interno 2042
-                            if '2042' in df_dados['Conta'].values:
-                                saldo_2042 = df_dados[df_dados['Conta'] == '2042']['Valor'].sum()
-                                if abs(saldo_2042) > 0.0: tem_2042_com_saldo = True
+                            # 1. Filtro Estoque Interno (123110801) - Pega o valor se existir e não compara com PDF
+                            if '123110801' in df_dados['Conta'].values:
+                                saldo_estoque = df_dados[df_dados['Conta'] == '123110801']['Valor'].sum()
+                                if abs(saldo_estoque) > 0.0: tem_estoque_com_saldo = True
                             
-                            # Filtros de Exclusão Padrão do Script Antigo
-                            exclusion_list = ['123110703', '123110402', '123119910']
+                            # 2. Filtros de Exclusão Padrão (Incluindo a própria conta de estoque 123110801 pra não cruzar)
+                            exclusion_list = ['123110703', '123110402', '123119910', '123110801']
                             df_dados = df_dados[~df_dados['Conta'].isin(exclusion_list)].copy()
                             
-                            # Tradução simultânea para a Chave de Cruzamento
+                            # 3. Tradução simultânea para a Chave de Cruzamento
                             df_dados['Chave_Vinculo'] = df_dados['Conta'].apply(lambda c: get_chave_vinculo(c, dict_matriz))
                             
                             # Filtra as linhas válidas que a MATRIZ conseguiu converter
@@ -300,7 +299,8 @@ if st.button("🚀 Iniciar Auditoria Unificada", type="primary", use_container_w
                             st.dataframe(divergencias[['Chave_Vinculo', 'Descricao', 'Saldo_PDF', 'Saldo_Excel', 'Diferenca']])
                     else: st.success("✅ Tudo certo! Nenhuma divergência encontrada.")
 
-                    if tem_2042_com_saldo: st.warning(f"ℹ️ Conta de Estoque Interno tem saldo: R$ {saldo_2042:,.2f}")
+                    if tem_estoque_com_saldo: 
+                        st.warning(f"ℹ️ Conta de Estoque Interno (123110801) tem saldo: R$ {saldo_estoque:,.2f}")
                     st.markdown("---")
 
                     # ==========================================
@@ -332,12 +332,12 @@ if st.button("🚀 Iniciar Auditoria Unificada", type="primary", use_container_w
                         pdf_out.set_font("helvetica", 'I', 9)
                         pdf_out.cell(0, 8, "Nenhuma divergência encontrada.", 1, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-                    if tem_2042_com_saldo:
+                    if tem_estoque_com_saldo:
                         pdf_out.ln(2)
                         pdf_out.set_font("helvetica", 'B', 9)
                         pdf_out.set_fill_color(255, 255, 200)
-                        pdf_out.cell(100, 8, "SALDO ESTOQUE INTERNO", 1, fill=True)
-                        pdf_out.cell(90, 8, f"R$ {formatar_real(saldo_2042)}", 1, fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                        pdf_out.cell(100, 8, "SALDO ESTOQUE INTERNO (123110801)", 1, fill=True)
+                        pdf_out.cell(90, 8, f"R$ {formatar_real(saldo_estoque)}", 1, fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
                     pdf_out.ln(2)
                     pdf_out.set_font("helvetica", 'B', 9)
