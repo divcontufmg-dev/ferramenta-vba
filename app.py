@@ -21,7 +21,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Estilos CSS
 hide_streamlit_style = """
             <style>
             #MainMenu {visibility: hidden;}
@@ -31,7 +30,6 @@ hide_streamlit_style = """
             """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
-# INICIALIZA A MEMÓRIA INTERNA
 if 'arquivos_memoria' not in st.session_state:
     st.session_state['arquivos_memoria'] = {}
 
@@ -40,14 +38,11 @@ if 'arquivos_memoria' not in st.session_state:
 # ==========================================
 def carregar_macro(nome_arquivo):
     try:
-        with open(nome_arquivo, "r", encoding="utf-8") as f:
-            return f.read()
+        with open(nome_arquivo, "r", encoding="utf-8") as f: return f.read()
     except:
         try:
-            with open(nome_arquivo, "r", encoding="latin-1") as f:
-                return f.read()
-        except:
-            return "Erro: Arquivo da macro não encontrado."
+            with open(nome_arquivo, "r", encoding="latin-1") as f: return f.read()
+        except: return "Erro: Arquivo da macro não encontrado."
 
 def limpar_valor(v):
     if v is None or pd.isna(v): return 0.0
@@ -60,13 +55,18 @@ def limpar_valor(v):
 
 def limpar_codigo_bruto(v):
     try:
+        if pd.isna(v): return ""
         s = str(v).strip()
         if s.endswith('.0'): s = s[:-2]
+        s = re.sub(r'\D', '', s) # Garante que só sobram números (remove pontos e traços)
         return s
     except: return ""
 
 def extrair_chave_vinculo(codigo_str):
-    try: return int(codigo_str[-2:])
+    try:
+        s = str(codigo_str).strip()
+        if len(s) >= 2: return int(s[-2:])
+        return int(s)
     except: return 0
 
 def formatar_real(valor):
@@ -81,7 +81,6 @@ class PDF_Report(FPDF):
         self.set_y(-15); self.set_font('helvetica', 'I', 8)
         self.cell(0, 10, f'Página {self.page_no()}', align='C')
 
-# --- FUNÇÃO DE FORMATAÇÃO DO EXCEL (FASE 1) ---
 def formatar_aba(writer, sheet_name, data_rows, header_rows):
     header_rows.to_excel(writer, sheet_name=sheet_name, startrow=0, startcol=1, index=False, header=False)
     data_rows.to_excel(writer, sheet_name=sheet_name, startrow=7, startcol=0, index=False, header=False)
@@ -110,7 +109,6 @@ def formatar_aba(writer, sheet_name, data_rows, header_rows):
         except: val_valor = 0
 
         row_idx = start_row_excel + i
-        
         if val_conta == 123110801 and val_valor != 0:
             worksheet.write(row_idx, 1, val_conta, fmt_red)
             worksheet.write(row_idx, 2, data_rows.iloc[i, 2], fmt_red)
@@ -137,7 +135,6 @@ with st.expander("📘 GUIA DE USO E MACROS (Clique para abrir)", expanded=False
     col_tut1, col_tut2 = st.columns(2)
     with col_tut1:
         st.info("💻 **Fase 1: Preparação no Excel (Opcional)**")
-        st.markdown("O sistema agora processa a Matriz automaticamente sem a macro. Mas se quiser processar manualmente, baixe as macros abaixo.")
         macro1_content = carregar_macro("macro_preparar.txt")
         st.download_button("📥 Baixar Macro 1: Preparar (.txt)", macro1_content, "Macro_1_Preparar.txt", "text/plain")
         macro2_content = carregar_macro("macro_dividir.txt")
@@ -145,11 +142,7 @@ with st.expander("📘 GUIA DE USO E MACROS (Clique para abrir)", expanded=False
 
     with col_tut2:
         st.success("🤖 **Fase 2: Na ferramenta (Automático)**")
-        st.markdown("""
-        1. Gere o Relatório em PDF no sistema RMB.
-        2. Carregue a Planilha SIAFI completa e os PDFs abaixo.
-        3. O sistema fará todo o processamento de divisão em memória e auditoria.
-        """)
+        st.markdown("1. Carregue a Planilha SIAFI completa e os PDFs abaixo.\n2. O sistema fará todo o processamento em memória e auditoria.")
 
 st.subheader("📂 1. Carregar Arquivos")
 col_upload1, col_upload2 = st.columns(2)
@@ -196,8 +189,7 @@ if st.button("▶️ 1º Passo: Processar SIAFI na Memória", type="secondary", 
                     
                     data_rows['Nova_Descricao'] = data_rows[0].map(lookup_dict)
                     cols = list(data_rows.columns)
-                    if 'Nova_Descricao' in cols:
-                        cols.insert(0, cols.pop(cols.index('Nova_Descricao')))
+                    if 'Nova_Descricao' in cols: cols.insert(0, cols.pop(cols.index('Nova_Descricao')))
                     data_rows = data_rows[cols]
                     data_rows = data_rows.sort_values(by='Nova_Descricao', ascending=True)
 
@@ -212,7 +204,7 @@ if st.button("▶️ 1º Passo: Processar SIAFI na Memória", type="secondary", 
                     single_excel_buffer.seek(0)
                     st.session_state['arquivos_memoria'][f"{item['name']}.xlsx"] = single_excel_buffer
 
-                st.success(f"✅ Sucesso! {len(st.session_state['arquivos_memoria'])} abas foram tratadas e armazenadas na memória interna.")
+                st.success(f"✅ Sucesso! {len(st.session_state['arquivos_memoria'])} abas prontas na memória.")
             except Exception as e:
                 st.error(f"❌ Erro ao processar: {e}")
 
@@ -221,17 +213,16 @@ if st.button("▶️ 1º Passo: Processar SIAFI na Memória", type="secondary", 
 # ==========================================
 if st.session_state.get('arquivos_memoria'):
     st.markdown("---")
-    st.subheader("👀 3. Visualizador de Arquivos (Memória Interna)")
-    st.info("Aqui você pode verificar como ficaram as planilhas geradas em memória. Observe que a Conta agora está na coluna 1, e o Valor na coluna 3.")
+    st.subheader("👀 3. Visualizador de Arquivos")
     
     nomes_arquivos = list(st.session_state['arquivos_memoria'].keys())
-    arquivo_selecionado = st.selectbox("Selecione a aba que deseja visualizar:", nomes_arquivos)
+    arquivo_selecionado = st.selectbox("Selecione a aba para visualizar a estrutura:", nomes_arquivos)
     
     if arquivo_selecionado:
         buffer = st.session_state['arquivos_memoria'][arquivo_selecionado]
         buffer.seek(0)
         df_visualizacao = pd.read_excel(buffer, header=None)
-        buffer.seek(0) # Retorna o cursor para a próxima etapa ler
+        buffer.seek(0)
         st.dataframe(df_visualizacao, use_container_width=True)
 
     st.markdown("---")
@@ -243,7 +234,7 @@ if st.session_state.get('arquivos_memoria'):
     
     if st.button("▶️ 2º Passo: Iniciar Auditoria", type="primary", use_container_width=True):
         if not uploaded_pdfs:
-            st.warning("⚠️ Você precisa anexar os relatórios RMB (.pdf) lá em cima para conciliar.")
+            st.warning("⚠️ Faltam os relatórios RMB (.pdf) para conciliar.")
         else:
             progresso = st.progress(0)
             status_text = st.empty()
@@ -253,22 +244,18 @@ if st.session_state.get('arquivos_memoria'):
             logs = []
 
             for name_ex, file_ex in st.session_state['arquivos_memoria'].items():
-                match = re.match(r'^(\d+)', name_ex)
+                match = re.search(r'^(\d+)', name_ex)
                 if match:
                     ug = match.group(1)
                     pdf_match = next((f for n, f in pdfs.items() if n.startswith(ug)), None)
-                    if pdf_match:
-                        pares.append({'ug': ug, 'excel': file_ex, 'pdf': pdf_match})
-                    else:
-                        logs.append(f"⚠️ UG {ug}: Planilha encontrada, mas falta o PDF correspondente.")
+                    if pdf_match: pares.append({'ug': ug, 'excel': file_ex, 'pdf': pdf_match})
+                    else: logs.append(f"⚠️ UG {ug}: Planilha encontrada, mas falta o PDF correspondente.")
             
             if not pares:
-                st.error("❌ Nenhum par completo (Planilha em Memória + PDF) foi identificado.")
+                st.error("❌ Nenhum par completo identificado.")
             else:
                 pdf_out = PDF_Report()
                 pdf_out.add_page()
-                st.markdown("---")
-                st.subheader("📊 Resultados da Análise")
 
                 for idx, par in enumerate(pares):
                     ug = par['ug']
@@ -277,7 +264,7 @@ if st.session_state.get('arquivos_memoria'):
                     with st.container():
                         st.info(f"🏢 **Unidade Gestora: {ug}**")
                         
-                        # === LEITURA EXCEL (DA MEMÓRIA) ===
+                        # === LEITURA EXCEL ===
                         df_padrao = pd.DataFrame()
                         saldo_2042 = 0.0
                         tem_2042_com_saldo = False
@@ -287,14 +274,10 @@ if st.session_state.get('arquivos_memoria'):
                             df_excel = pd.read_excel(par['excel'], header=None)
                             
                             if len(df_excel.columns) >= 4:
-                                # Os dados começam na linha 8 (índice 7)
                                 df_dados = df_excel.iloc[7:].copy()
                                 
-                                # Com base no formatar_aba do Passo 1:
-                                # Coluna 0 = Nova_Descricao
-                                # Coluna 1 = Conta (Original 0)
-                                # Coluna 3 = Valor (Original 3)
-                                df_dados['Codigo_Limpo'] = df_dados.iloc[:, 1].apply(limpar_codigo_bruto)
+                                # Limpeza forçada (Extração Inteligente)
+                                df_dados['Codigo_Limpo'] = df_dados.iloc[:, 1].astype(str).apply(limpar_codigo_bruto)
                                 df_dados['Descricao_Excel'] = df_dados.iloc[:, 0].astype(str).str.strip().str.upper()
                                 df_dados['Valor_Limpo'] = df_dados.iloc[:, 3].apply(limpar_valor)
                                 
@@ -312,8 +295,7 @@ if st.session_state.get('arquivos_memoria'):
                                     'Descricao_Excel': 'first'
                                 }).reset_index()
                                 df_padrao.columns = ['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa']
-                        except Exception as e:
-                            logs.append(f"❌ Erro Excel UG {ug}: {e}")
+                        except Exception as e: logs.append(f"❌ Erro Excel UG {ug}: {e}")
 
                         # === LEITURA PDF ===
                         df_pdf_final = pd.DataFrame()
@@ -329,8 +311,7 @@ if st.session_state.get('arquivos_memoria'):
                                     is_ocr = False
                                     tem_dados_validos = False
                                     
-                                    if txt:
-                                        if re.search(r'\d{1,3}(?:[.,]\d{3})*[.,]\d{2}', txt): tem_dados_validos = True
+                                    if txt and re.search(r'\d{1,3}(?:[.,]\d{3})*[.,]\d{2}', txt): tem_dados_validos = True
                                     
                                     if not txt or not tem_dados_validos or len(txt) < 50:
                                         is_ocr = True
@@ -350,7 +331,9 @@ if st.session_state.get('arquivos_memoria'):
                                     if "DE ENTRADAS" in txt.upper() or "DE SAÍDAS" in txt.upper(): continue
 
                                     for line in txt.split('\n'):
-                                        if re.match(r'^"?\d+"?\s+', line):
+                                        line = line.strip()
+                                        # Regex corrigido: Não obriga ter espaço após o código numérico
+                                        if re.match(r'^"?\d+', line):
                                             vals = []
                                             if is_ocr:
                                                 vals_raw = re.findall(r'([\d\.\s]+,\d{2})', line)
@@ -366,25 +349,31 @@ if st.session_state.get('arquivos_memoria'):
                                                         'Chave_Vinculo': int(chave_raw),
                                                         'Saldo_PDF': limpar_valor(vals[-4])
                                                     })
-                            
                             if dados_pdf:
                                 df_pdf_final = pd.DataFrame(dados_pdf).groupby('Chave_Vinculo')['Saldo_PDF'].sum().reset_index()
-                        except Exception as e:
-                            logs.append(f"❌ Erro Leitura PDF UG {ug}: {e}")
+                        except Exception as e: logs.append(f"❌ Erro Leitura PDF UG {ug}: {e}")
 
                         # === CRUZAMENTO ===
                         if df_padrao.empty: df_padrao = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa'])
                         if df_pdf_final.empty: df_pdf_final = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_PDF'])
 
                         final = pd.merge(df_pdf_final, df_padrao, on='Chave_Vinculo', how='outer').fillna(0)
-                        final['Descricao'] = final.apply(lambda x: x['Descricao_Completa'] if x['Descricao_Completa'] != 0 else "ITEM SEM DESCRIÇÃO NO SIAFI", axis=1)
+                        
+                        # Correção de exibição de descrição caso seja vazio
+                        final['Descricao'] = final.apply(lambda x: x['Descricao_Completa'] if pd.notna(x['Descricao_Completa']) and str(x['Descricao_Completa']).strip() != '0' else "ITEM SEM DESCRIÇÃO", axis=1)
                         final['Diferenca'] = (final['Saldo_PDF'] - final['Saldo_Excel']).round(2)
                         divergencias = final[abs(final['Diferenca']) > 0.05].copy()
 
-                        # === EXIBIÇÃO ===
+                        # === EXIBIÇÃO E RAIO-X ===
                         soma_pdf = final['Saldo_PDF'].sum()
                         soma_excel = final['Saldo_Excel'].sum()
                         dif_total = soma_pdf - soma_excel
+
+                        # Painel de Debug (Raio-X)
+                        with st.expander("🛠️ Raio-X da Extração (Veja o que o sistema leu)"):
+                            st.write(f"**EXCEL:** Linhas com valores lidas na Tabela: `{len(df_dados) if not df_padrao.empty else 0}`")
+                            st.write(f"**EXCEL:** Contas Bens Móveis (Série 449) filtradas: `{len(df_padrao)}`")
+                            st.write(f"**PDF:** Contas válidas extraídas do arquivo: `{len(df_pdf_final)}`")
 
                         col1, col2, col3 = st.columns(3)
                         col1.metric("Total RMB (PDF)", f"R$ {soma_pdf:,.2f}")
@@ -395,12 +384,9 @@ if st.session_state.get('arquivos_memoria'):
                             st.warning(f"⚠️ Atenção: {len(divergencias)} conta(s) com divergência.")
                             with st.expander("Ver Detalhes das Divergências"):
                                 st.dataframe(divergencias[['Chave_Vinculo', 'Descricao', 'Saldo_PDF', 'Saldo_Excel', 'Diferenca']])
-                        else:
-                            st.success("✅ Tudo certo! Nenhuma divergência encontrada.")
+                        else: st.success("✅ Tudo certo! Nenhuma divergência encontrada.")
 
-                        if tem_2042_com_saldo:
-                            st.warning(f"ℹ️ Conta de Estoque Interno tem saldo: R$ {saldo_2042:,.2f}")
-
+                        if tem_2042_com_saldo: st.warning(f"ℹ️ Conta de Estoque Interno tem saldo: R$ {saldo_2042:,.2f}")
                         st.markdown("---")
 
                         # === GERAÇÃO PDF FINAL ===
@@ -454,12 +440,10 @@ if st.session_state.get('arquivos_memoria'):
                 progresso.empty()
                 
                 if logs:
-                    with st.expander("⚠️ Avisos"):
+                    with st.expander("⚠️ Avisos do Sistema"):
                         for log in logs: st.write(log)
                 
                 try:
                     pdf_bytes = bytes(pdf_out.output())
                     st.download_button("BAIXAR RELATÓRIO PDF FINAL", pdf_bytes, "RELATORIO_FINAL_CONCILIACAO.pdf", "application/pdf", type="primary", use_container_width=True)
-                except Exception as e:
-                    st.error(f"Erro no download: {e}")
-                    
+                except Exception as e: st.error(f"Erro no download: {e}")
