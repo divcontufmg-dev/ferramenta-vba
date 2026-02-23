@@ -30,7 +30,7 @@ hide_streamlit_style = """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # ==========================================
-# FUNÇÕES E CLASSES MANTIDAS (CÓDIGOS ORIGINAIS)
+# FUNÇÕES E CLASSES
 # ==========================================
 
 def limpar_valor(v):
@@ -70,7 +70,7 @@ class PDF_Report(FPDF):
 # ==========================================
 st.title("📊 Ferramenta Unificada: Conciliador RMB x SIAFI")
 st.markdown("""
-Lê a planilha completa (varrendo todas as abas), aplica os filtros/PROCV da MATRIZ de forma dinâmica e faz a conciliação automática com o PDF correspondente de cada aba.
+A ferramenta agora lê os dados exatamente na posição original que a sua macro VBA lia, aplicando a Matriz e a Conciliação em uma única etapa inteligente.
 """)
 st.markdown("---")
 
@@ -94,18 +94,17 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
         siafi_file = next((f for f in excels), None)
 
         if not siafi_file:
-            st.error("❌ A Planilha SIAFI não foi anexada. Por favor, inclua o arquivo Excel.")
+            st.error("❌ A Planilha SIAFI não foi anexada.")
             st.stop()
 
         # === 1. LER MATRIZ.XLSX ===
         if not os.path.exists("MATRIZ.xlsx"):
-            st.error("❌ O arquivo 'MATRIZ.xlsx' não foi encontrado na pasta do sistema (GitHub).")
+            st.error("❌ O arquivo 'MATRIZ.xlsx' não foi encontrado na pasta do sistema.")
             st.stop()
             
         try:
             df_matriz = pd.read_excel("MATRIZ.xlsx", usecols="A:B", header=None)
             df_matriz.columns = ['Chave', 'Descricao']
-            # Garante que a chave da matriz seja uma string limpa para não falhar o cruzamento
             df_matriz['Chave'] = df_matriz['Chave'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
             df_matriz = df_matriz.drop_duplicates(subset=['Chave'], keep='first')
             lookup_dict = dict(zip(df_matriz['Chave'], df_matriz['Descricao']))
@@ -123,7 +122,6 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
             match = re.search(r'(\d+)', aba)
             if match:
                 ug = match.group(1)
-                # Verifica se o UG está no nome do PDF
                 pdf_match = next((f for n, f in pdfs.items() if ug in n), None)
                 if pdf_match:
                     pares.append({'ug': ug, 'nome_aba': aba, 'pdf': pdf_match})
@@ -152,35 +150,40 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
                 saldo_2042 = 0.0
                 tem_2042_com_saldo = False
                 
-                # --- PREPARAÇÃO EXCEL E CONCILIAÇÃO ---
+                # --- PREPARAÇÃO DO EXCEL ---
                 try:
                     siafi_file.seek(0)
-                    # Lê a aba inteira sem pular linhas (ignora o erro de cabeçalhos pequenos)
                     df_raw = pd.read_excel(siafi_file, sheet_name=nome_aba, header=None)
                     
-                    if not df_raw.empty and len(df_raw.columns) >= 4:
+                    if len(df_raw) >= 8:
+                        # O VBA original começava a ler a partir da linha 8 (índice 7 no Python)
+                        df_data = df_raw.iloc[7:].copy()
+                        
                         df_calc = pd.DataFrame()
                         
-                        # 1. Extração bruta exata das posições originais da Ferramenta 2
-                        df_calc['Codigo_Limpo'] = df_raw.iloc[:, 0].apply(limpar_codigo_bruto) # Coluna A
-                        df_calc['Descricao_Original'] = df_raw.iloc[:, 2].astype(str).str.strip().str.upper() # Coluna C
-                        df_calc['Valor_Limpo'] = df_raw.iloc[:, 3].apply(limpar_valor) # Coluna D
+                        # ALINHAMENTO EXATO REVELADO PELO VBA (ANTES DO INSERT DA COLUNA A)
+                        # Coluna 0 (A) -> Código da Conta
+                        # Coluna 1 (B) -> Descrição Original
+                        # Coluna 2 (C) -> Valor Monetário
+                        df_calc['Codigo_Limpo'] = df_data.iloc[:, 0].apply(limpar_codigo_bruto)
+                        df_calc['Descricao_Original'] = df_data.iloc[:, 1].astype(str).str.strip().str.upper()
+                        df_calc['Valor_Limpo'] = df_data.iloc[:, 2].apply(limpar_valor)
                         
-                        # 2. Exclusão das contas (Regra Ferramenta 1)
+                        # Exclusão das contas (Regra da Ferramenta 1)
                         exclusion_list = ['123110703', '123110402', '123119910']
                         df_calc = df_calc[~df_calc['Codigo_Limpo'].isin(exclusion_list)]
                         
-                        # 3. PROCV (Substitui pela descrição da MATRIZ se existir)
+                        # PROCV Automático da MATRIZ
                         df_calc['Nova_Descricao'] = df_calc['Codigo_Limpo'].map(lookup_dict)
                         df_calc['Descricao_Excel'] = df_calc['Nova_Descricao'].fillna(df_calc['Descricao_Original']).astype(str).str.upper()
                         
-                        # 4. Captura a Conta 2042 de estoque
+                        # Captura a Conta 2042 de estoque
                         mask_2042 = df_calc['Codigo_Limpo'] == '2042'
                         if mask_2042.any():
                             saldo_2042 = df_calc.loc[mask_2042, 'Valor_Limpo'].sum()
                             if abs(saldo_2042) > 0.00: tem_2042_com_saldo = True
                         
-                        # 5. Aplica filtro principal para conciliação ('449')
+                        # Aplica filtro principal para conciliação ('449') - Lógica da Ferramenta 2
                         mask_padrao = df_calc['Codigo_Limpo'].str.startswith('449')
                         df_dados = df_calc[mask_padrao].copy()
                         
@@ -193,7 +196,7 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
                 except Exception as e:
                     logs.append(f"❌ Erro na leitura Excel da UG {ug}: {e}")
 
-                # --- LEITURA DO PDF (MANTIDA INTACTA) ---
+                # --- LEITURA DO PDF ---
                 df_pdf_final = pd.DataFrame()
                 dados_pdf = []
                 
