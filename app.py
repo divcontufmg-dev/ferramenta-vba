@@ -31,7 +31,7 @@ hide_streamlit_style = """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # ==========================================
-# FUNÇÕES E CLASSES (FERRAMENTA 2)
+# FUNÇÕES E CLASSES
 # ==========================================
 
 def limpar_valor(v):
@@ -71,8 +71,7 @@ class PDF_Report(FPDF):
 # ==========================================
 st.title("📊 Ferramenta Unificada: Preparador + Conciliador")
 st.markdown("""
-O sistema executa os dois processos de forma sequencial e independente em memória: 
-prepara a planilha com a MATRIZ, guarda o resultado internamente e depois concilia com os PDFs.
+Esta versão atua em duas etapas isoladas em memória: primeiro emula a **macro VBA** que preparava e dividia as abas, empurrando as colunas corretamente, e depois roda o conciliador casando os arquivos virtuais com os PDFs.
 """)
 st.markdown("---")
 
@@ -90,7 +89,6 @@ if st.button("▶️ Iniciar Processamento Duplo", use_container_width=True, typ
         status_text = st.empty()
         logs = []
         
-        # Identificação dos ficheiros
         pdfs = {f.name: f for f in uploaded_files if f.name.lower().endswith('.pdf')}
         excels = [f for f in uploaded_files if f.name.lower().endswith(('.xlsx', '.xls'))]
         siafi_file = next((f for f in excels), None)
@@ -115,9 +113,9 @@ if st.button("▶️ Iniciar Processamento Duplo", use_container_width=True, typ
             st.stop()
 
         # =========================================================================
-        # FASE 1: O PREPARADOR (Atuando de forma independente e guardando na memória)
+        # FASE 1: O PREPARADOR (Emulação Perfeita do VBA em Memória)
         # =========================================================================
-        status_text.text("⚙️ FASE 1: Preparando planilhas e aplicando MATRIZ...")
+        status_text.text("⚙️ FASE 1: Preparando planilhas, emulando o VBA e separando abas...")
         planilhas_preparadas_memoria = {}
         
         xls_file = pd.ExcelFile(siafi_file)
@@ -129,39 +127,51 @@ if st.button("▶️ Iniciar Processamento Duplo", use_container_width=True, typ
             df_raw = pd.read_excel(siafi_file, sheet_name=aba, header=None)
             
             if len(df_raw) >= 8:
-                # Separa cabeçalho e dados assim como o Código 1
-                header_rows = df_raw.iloc[:7].copy()
-                data_rows = df_raw.iloc[7:].copy()
+                # Cria a estrutura deslocada que o VBA fazia (Insere Coluna A vazia)
+                df_prepared = pd.DataFrame(index=df_raw.index)
+                df_prepared[0] = "" # Nova Coluna A (PROCV)
                 
-                # --- Lógica Fiel do Preparador ---
-                data_rows[0] = pd.to_numeric(data_rows[0], errors='coerce')
+                # Desloca as colunas originais para a direita (A vira B, B vira C...)
+                for col in df_raw.columns:
+                    df_prepared[col + 1] = df_raw[col]
                 
-                # Filtro de Exclusão
+                # Mascara para isolar dados a partir da linha 8 (índice 7)
+                data_mask = df_prepared.index >= 7
+                
+                # Coluna B (agora índice 1) é o Código da Conta
+                df_prepared.loc[data_mask, 1] = pd.to_numeric(df_prepared.loc[data_mask, 1], errors='coerce')
+                
+                # Exclusão das contas
                 exclusion_list = [123110703, 123110402, 123119910]
-                data_rows = data_rows[~data_rows[0].isin(exclusion_list)]
+                linhas_para_excluir = data_mask & df_prepared[1].isin(exclusion_list)
+                df_prepared = df_prepared[~linhas_para_excluir]
                 
-                # PROCV
-                desc_mapeada = data_rows[0].map(lookup_dict)
-                data_rows[2] = desc_mapeada.fillna(data_rows[2])
+                # Refaz a mascara após deletar linhas
+                data_mask = df_prepared.index >= 7
                 
-                # --- Criação do "Ficheiro Virtual" ---
-                # Isto garante que a Ferramenta 2 leia os dados como se o ficheiro tivesse sido descarregado
+                # Aplica o PROCV na Nova Coluna A (índice 0)
+                desc_mapeada = df_prepared.loc[data_mask, 1].map(lookup_dict)
+                # Se não encontrar na Matriz, usa a descrição original (agora Coluna C, índice 2)
+                df_prepared.loc[data_mask, 0] = desc_mapeada.fillna(df_prepared.loc[data_mask, 2])
+                
+                # --- Criação do Arquivo Físico "Virtual" ---
                 virtual_excel = io.BytesIO()
                 with pd.ExcelWriter(virtual_excel, engine='xlsxwriter') as writer:
-                    header_rows.to_excel(writer, sheet_name=aba, startrow=0, startcol=0, index=False, header=False)
-                    data_rows.to_excel(writer, sheet_name=aba, startrow=7, startcol=0, index=False, header=False)
+                    df_prepared.to_excel(writer, index=False, header=False)
                 virtual_excel.seek(0)
                 
                 planilhas_preparadas_memoria[aba] = virtual_excel
 
         # =========================================================================
-        # MAPEAMENTO PARA A FASE 2
+        # CASAMENTO DOS ARQUIVOS (Nome da Aba vs Nome do PDF)
         # =========================================================================
         pares = []
         for aba, virtual_excel in planilhas_preparadas_memoria.items():
+            # Extrai o código da UG do nome da aba (ex: "153287FACULDADE" -> "153287")
             match = re.search(r'(\d+)', aba)
             if match:
                 ug = match.group(1)
+                # Procura PDF com este número
                 pdf_match = next((f for n, f in pdfs.items() if ug in n), None)
                 if pdf_match:
                     pares.append({'ug': ug, 'nome_aba': aba, 'excel_virtual': virtual_excel, 'pdf': pdf_match})
@@ -173,7 +183,7 @@ if st.button("▶️ Iniciar Processamento Duplo", use_container_width=True, typ
             st.stop()
 
         # =========================================================================
-        # FASE 2: O CONCILIADOR (Lê o arquivo virtual independentemente)
+        # FASE 2: O CONCILIADOR (Lendo exatamente nas posições do VBA)
         # =========================================================================
         pdf_out = PDF_Report()
         pdf_out.add_page()
@@ -184,7 +194,7 @@ if st.button("▶️ Iniciar Processamento Duplo", use_container_width=True, typ
         for idx, par in enumerate(pares):
             ug = par['ug']
             nome_aba = par['nome_aba']
-            status_text.text(f"⚙️ FASE 2: Conciliando Aba '{nome_aba}' (UG {ug})...")
+            status_text.text(f"⚙️ FASE 2: Conciliando UG {ug}...")
             
             with st.container():
                 st.info(f"🏢 **Unidade Gestora: {ug} (Aba: {nome_aba})**")
@@ -193,21 +203,23 @@ if st.button("▶️ Iniciar Processamento Duplo", use_container_width=True, typ
                 saldo_2042 = 0.0
                 tem_2042_com_saldo = False
                 
-                # --- LEITURA DO EXCEL VIRTUAL (Como se fosse ficheiro físico) ---
+                # --- LEITURA DO EXCEL VIRTUAL (Como se fosse o original do usuário) ---
                 try:
                     excel_stream = par['excel_virtual']
                     excel_stream.seek(0)
-                    # O código original do conciliador lia tudo com header=None e começava a filtrar na linha 7
                     df_aba = pd.read_excel(excel_stream, header=None)
-                    df_data = df_aba.iloc[7:].copy()
                     
+                    df_data = df_aba.iloc[7:].copy()
                     df_calc = pd.DataFrame()
-                    # Mapeamento Clássico Original (0: Conta, 2: Descrição, 3: Valor)
-                    df_calc['Codigo_Limpo'] = df_data[0].apply(limpar_codigo_bruto)
-                    df_calc['Descricao_Excel'] = df_data[2].astype(str).str.strip().str.upper()
+                    
+                    # ALINHAMENTO CORRETO PÓS-VBA:
+                    # 1 (B) -> Conta
+                    # 0 (A) -> Descrição (PROCV)
+                    # 3 (D) -> Valor Monetário
+                    df_calc['Codigo_Limpo'] = df_data[1].apply(limpar_codigo_bruto)
+                    df_calc['Descricao_Excel'] = df_data[0].astype(str).str.strip().str.upper()
                     df_calc['Valor_Limpo'] = df_data[3].apply(limpar_valor)
                     
-                    # Lógica Conta Estoque 2042
                     mask_2042 = df_calc['Codigo_Limpo'] == '2042'
                     if mask_2042.any():
                         saldo_2042 = df_calc.loc[mask_2042, 'Valor_Limpo'].sum()
@@ -227,7 +239,7 @@ if st.button("▶️ Iniciar Processamento Duplo", use_container_width=True, typ
                 except Exception as e:
                     logs.append(f"❌ Erro na leitura do Excel Preparado da UG {ug}: {e}")
 
-                # --- LEITURA DO PDF (Intacta) ---
+                # --- LEITURA DO PDF ---
                 df_pdf_final = pd.DataFrame()
                 dados_pdf = []
                 
