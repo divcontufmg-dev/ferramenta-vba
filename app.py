@@ -14,7 +14,7 @@ from pytesseract import Output
 # CONFIGURAÇÃO INICIAL
 # ==========================================
 st.set_page_config(
-    page_title="Conciliador RMB x SIAFI (Motor Direto)",
+    page_title="Conciliador RMB x SIAFI (Tradução Direta)",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -30,7 +30,7 @@ hide_streamlit_style = """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # ==========================================
-# FUNÇÕES CORE (LÓGICA ORIGINAL)
+# FUNÇÕES CORE (LÓGICA INVERSA)
 # ==========================================
 def limpar_valor(v):
     if v is None or pd.isna(v): return 0.0
@@ -48,9 +48,24 @@ def limpar_codigo_bruto(v):
         return s
     except: return ""
 
-def extrair_chave_vinculo(codigo_str):
-    try: return int(codigo_str[-2:])
-    except: return 0
+def extrair_chave_via_matriz(codigo_original, dict_matriz):
+    """
+    Lógica Nova: Pega o código da planilha (ex: 123110102),
+    busca na matriz (ex: acha 44905206) e retorna os últimos 2 dígitos (06).
+    """
+    codigo_original = str(codigo_original).strip()
+    if not codigo_original or codigo_original == '0':
+        return None
+        
+    valor_matriz = str(dict_matriz.get(codigo_original, "")).strip()
+    
+    # Procura um código que comece com 449 na resposta da matriz
+    match = re.search(r'(449\d+)', valor_matriz)
+    if match:
+        codigo_encontrado = match.group(1)
+        return int(codigo_encontrado[-2:]) # Pega apenas os 2 últimos
+    
+    return None
 
 def formatar_real(valor):
     return f"{valor:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
@@ -67,10 +82,9 @@ class PDF_Report(FPDF):
 # ==========================================
 # INTERFACE DO USUÁRIO
 # ==========================================
-st.title("📊 Conciliador RMB x SIAFI (Versão Unificada Direta)")
+st.title("📊 Conciliador RMB x SIAFI (Tradução via Matriz)")
 st.markdown("""
-**Instruções:**
-Faça o upload da planilha SIAFI Bruta e dos PDFs do RMB. O sistema processará os filtros, aplicará a MATRIZ e gerará o relatório PDF imediatamente, sem necessidade de separar arquivos.
+**Novo Motor de Leitura:** O sistema agora faz a tradução simultânea das chaves usando a MATRIZ como dicionário, lendo as colunas originais do SIAFI (Código na Coluna A, Descrição na Coluna B, Valor na Coluna C) sem alterar a estrutura da planilha.
 """)
 st.markdown("---")
 
@@ -83,30 +97,29 @@ with col_upload2:
 st.markdown("---")
 
 # ==========================================
-# MOTOR DE PROCESSAMENTO E CONCILIAÇÃO
+# PROCESSAMENTO PRINCIPAL
 # ==========================================
-if st.button("🚀 Iniciar Conciliação Completa", type="primary", use_container_width=True):
+if st.button("🚀 Iniciar Auditoria", type="primary", use_container_width=True):
     if not os.path.exists("MATRIZ.xlsx"):
         st.error("❌ O arquivo 'MATRIZ.xlsx' não foi encontrado na pasta do sistema.")
     elif uploaded_siafi is None:
         st.warning("⚠️ Por favor, carregue a Planilha Principal SIAFI.")
     elif not uploaded_pdfs:
-        st.warning("⚠️ Faltam os relatórios RMB (.pdf) para conciliar.")
+        st.warning("⚠️ Faltam os relatórios RMB (.pdf).")
     else:
         progresso = st.progress(0)
         status_text = st.empty()
         
-        # 1. Carregar a Matriz
+        # 1. Carregar a Matriz como Dicionário Seguro
         try:
             df_matriz = pd.read_excel("MATRIZ.xlsx", usecols="A:B", header=None)
-            df_matriz.columns = ['Chave', 'Descricao']
-            df_matriz = df_matriz.drop_duplicates(subset=['Chave'], keep='first')
-            lookup_dict = dict(zip(df_matriz['Chave'], df_matriz['Descricao']))
+            # Transforma tudo em texto limpo para evitar erros de tipagem
+            lookup_dict = {str(k).strip(): str(v).strip() for k, v in zip(df_matriz[0], df_matriz[1])}
         except Exception as e:
             st.error(f"Erro ao ler a MATRIZ.xlsx: {e}")
             st.stop()
 
-        # 2. Preparar arquivos para cruzamento
+        # 2. Parear Arquivos
         pdfs = {f.name: f for f in uploaded_pdfs}
         pares = []
         logs = []
@@ -122,7 +135,7 @@ if st.button("🚀 Iniciar Conciliação Completa", type="primary", use_containe
                     if pdf_match: 
                         pares.append({'ug': ug, 'sheet_name': sheet_name, 'pdf': pdf_match})
                     else: 
-                        logs.append(f"⚠️ UG {ug}: Aba encontrada no SIAFI, mas falta o PDF correspondente.")
+                        logs.append(f"⚠️ UG {ug}: Aba encontrada no SIAFI, mas falta o PDF.")
         except Exception as e:
             st.error(f"Erro ao abrir o arquivo SIAFI: {e}")
             st.stop()
@@ -142,7 +155,7 @@ if st.button("🚀 Iniciar Conciliação Completa", type="primary", use_containe
                     st.info(f"🏢 **Unidade Gestora: {ug}**")
                     
                     # ==========================================
-                    # LEITURA DIRETA E PURA DO EXCEL
+                    # LEITURA DO EXCEL (Caminho Inverso / Tradução)
                     # ==========================================
                     df_padrao = pd.DataFrame()
                     saldo_2042 = 0.0
@@ -155,42 +168,49 @@ if st.button("🚀 Iniciar Conciliação Completa", type="primary", use_containe
                             # Isola os dados a partir da linha 8
                             df_dados = df_raw.iloc[7:].copy()
                             
-                            # Filtro original de contas de exclusão
-                            df_dados[0] = pd.to_numeric(df_dados[0], errors='coerce')
-                            exclusion_list = [123110703, 123110402, 123119910]
-                            df_dados = df_dados[~df_dados[0].isin(exclusion_list)]
+                            # Mapeamento de Colunas Solicitado: A(0)=Código, B(1)=Descrição, C(2)=Valor
+                            df_dados['Codigo_Siafi'] = df_dados.iloc[:, 0].apply(limpar_codigo_bruto)
+                            df_dados['Descricao_Planilha'] = df_dados.iloc[:, 1].astype(str).str.strip().str.upper()
                             
-                            # Limpeza dos valores brutos - Coluna 0 é a Conta, Coluna 3 é o Valor
-                            df_dados['Codigo_Limpo'] = df_dados[0].apply(limpar_codigo_bruto)
-                            df_dados['Valor_Limpo'] = df_dados[3].apply(limpar_valor)
+                            # Tenta ler a Coluna C(2), se por acaso o valor estiver na D(3) ele salva também
+                            def pegar_valor(row):
+                                val = limpar_valor(row.iloc[2]) if len(row) > 2 else 0.0
+                                if val == 0.0 and len(row) > 3: val = limpar_valor(row.iloc[3])
+                                return val
                             
-                            # Aplicação do PROCV usando a MATRIZ original
-                            df_dados['Descricao_MATRIZ'] = df_dados[0].map(lookup_dict).fillna("ITEM SEM DESCRIÇÃO NO SIAFI")
+                            df_dados['Valor_Siafi'] = df_dados.apply(pegar_valor, axis=1)
                             
-                            # Filtro 2042
-                            mask_2042 = df_dados['Codigo_Limpo'] == '2042'
+                            # Exclusões
+                            exclusion_list = ['123110703', '123110402', '123119910']
+                            df_dados = df_dados[~df_dados['Codigo_Siafi'].isin(exclusion_list)].copy()
+                            
+                            # Verifica Estoque Interno (2042)
+                            mask_2042 = df_dados['Codigo_Siafi'] == '2042'
                             if mask_2042.any():
-                                saldo_2042 = df_dados.loc[mask_2042, 'Valor_Limpo'].sum()
+                                saldo_2042 = df_dados.loc[mask_2042, 'Valor_Siafi'].sum()
                                 if abs(saldo_2042) > 0.00: tem_2042_com_saldo = True
                             
-                            # Filtro 449 (O grupo que nos interessa reconciliar)
-                            mask_padrao = df_dados['Codigo_Limpo'].str.startswith('449')
-                            df_padrao_bruto = df_dados[mask_padrao].copy()
+                            # APICA A TRADUÇÃO: Busca o código na Matriz e extrai a chave (ex: 06)
+                            df_dados['Chave_Vinculo'] = df_dados['Codigo_Siafi'].apply(lambda c: extrair_chave_via_matriz(c, lookup_dict))
                             
-                            # Geração da Chave (Últimos 2 dígitos do código 449...)
-                            df_padrao_bruto['Chave_Vinculo'] = df_padrao_bruto['Codigo_Limpo'].apply(extrair_chave_vinculo)
+                            # Remove as linhas que não viraram chave (que não tinham 449 na Matriz)
+                            df_dados_filtrados = df_dados.dropna(subset=['Chave_Vinculo']).copy()
                             
-                            df_padrao = df_padrao_bruto.groupby('Chave_Vinculo').agg({
-                                'Valor_Limpo': 'sum',
-                                'Descricao_MATRIZ': 'first'
-                            }).reset_index()
-                            
-                            df_padrao.columns = ['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa']
+                            if not df_dados_filtrados.empty:
+                                df_dados_filtrados['Chave_Vinculo'] = df_dados_filtrados['Chave_Vinculo'].astype(int)
+                                
+                                df_padrao = df_dados_filtrados.groupby('Chave_Vinculo').agg({
+                                    'Valor_Siafi': 'sum',
+                                    'Descricao_Planilha': 'first' # Mantém a descrição da coluna B da planilha
+                                }).reset_index()
+                                
+                                df_padrao.columns = ['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa']
+
                     except Exception as e:
-                        logs.append(f"❌ Erro leitura SIAFI UG {ug}: {e}")
+                        logs.append(f"❌ Erro na leitura do SIAFI UG {ug}: {e}")
 
                     # ==========================================
-                    # LEITURA DO PDF (INTACTA)
+                    # LEITURA DO PDF
                     # ==========================================
                     df_pdf_final = pd.DataFrame()
                     dados_pdf = []
@@ -239,7 +259,7 @@ if st.button("🚀 Iniciar Conciliação Completa", type="primary", use_containe
                                             if chave_match:
                                                 chave_raw = chave_match.group(1)
                                                 dados_pdf.append({
-                                                    'Chave_Vinculo': int(chave_raw), # <-- Extrai o "07" ou "16" direto
+                                                    'Chave_Vinculo': int(chave_raw),
                                                     'Saldo_PDF': limpar_valor(vals[-4])
                                                 })
                         if dados_pdf:
@@ -247,7 +267,7 @@ if st.button("🚀 Iniciar Conciliação Completa", type="primary", use_containe
                     except Exception as e: logs.append(f"❌ Erro Leitura PDF UG {ug}: {e}")
 
                     # ==========================================
-                    # CRUZAMENTO E GERAÇÃO DO RELATÓRIO
+                    # CRUZAMENTO
                     # ==========================================
                     if df_padrao.empty: df_padrao = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa'])
                     if df_pdf_final.empty: df_pdf_final = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_PDF'])
@@ -261,6 +281,12 @@ if st.button("🚀 Iniciar Conciliação Completa", type="primary", use_containe
                     soma_pdf = final['Saldo_PDF'].sum()
                     soma_excel = final['Saldo_Excel'].sum()
                     dif_total = soma_pdf - soma_excel
+
+                    # --- EXIBIÇÃO ---
+                    with st.expander("🛠️ Raio-X da Extração (Log de Auditoria)"):
+                        st.write(f"**Matriz carregada:** `{len(lookup_dict)}` códigos.")
+                        st.write(f"**EXCEL:** Contas válidas conciliadas via tradução de Matriz: `{len(df_padrao)}`")
+                        st.write(f"**PDF:** Contas válidas extraídas do arquivo: `{len(df_pdf_final)}`")
 
                     col1, col2, col3 = st.columns(3)
                     col1.metric("Total RMB (PDF)", f"R$ {soma_pdf:,.2f}")
@@ -276,7 +302,9 @@ if st.button("🚀 Iniciar Conciliação Completa", type="primary", use_containe
                     if tem_2042_com_saldo: st.warning(f"ℹ️ Conta de Estoque Interno tem saldo: R$ {saldo_2042:,.2f}")
                     st.markdown("---")
 
-                    # Geração do PDF da UG Atual
+                    # ==========================================
+                    # RELATÓRIO PDF
+                    # ==========================================
                     pdf_out.set_font("helvetica", 'B', 11)
                     pdf_out.set_fill_color(240, 240, 240)
                     pdf_out.cell(0, 10, text=f"Unidade Gestora: {ug}", border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
