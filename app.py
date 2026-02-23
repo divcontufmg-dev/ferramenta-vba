@@ -34,7 +34,7 @@ if 'arquivos_memoria' not in st.session_state:
     st.session_state['arquivos_memoria'] = {}
 
 # ==========================================
-# FUNÇÕES E CLASSES
+# FUNÇÕES E CLASSES (REVERTIDAS PARA ORIGINAL)
 # ==========================================
 def carregar_macro(nome_arquivo):
     try:
@@ -53,20 +53,17 @@ def limpar_valor(v):
     try: return float(re.sub(r'[^\d.-]', '', v))
     except: return 0.0
 
+# REVERTIDO: Mantém apenas o tratamento original do código
 def limpar_codigo_bruto(v):
     try:
-        if pd.isna(v): return ""
         s = str(v).strip()
         if s.endswith('.0'): s = s[:-2]
-        s = re.sub(r'\D', '', s) # Garante que só sobram números (remove pontos e traços)
         return s
     except: return ""
 
+# REVERTIDO: Extração clássica dos últimos dois dígitos
 def extrair_chave_vinculo(codigo_str):
-    try:
-        s = str(codigo_str).strip()
-        if len(s) >= 2: return int(s[-2:])
-        return int(s)
+    try: return int(codigo_str[-2:])
     except: return 0
 
 def formatar_real(valor):
@@ -268,32 +265,33 @@ if st.session_state.get('arquivos_memoria'):
                         df_padrao = pd.DataFrame()
                         saldo_2042 = 0.0
                         tem_2042_com_saldo = False
-                        df_dados = pd.DataFrame() # Inicializa vazio para evitar erros no Raio-X
+                        df = pd.DataFrame()
                         
                         try:
                             par['excel'].seek(0)
-                            df_excel = pd.read_excel(par['excel'], header=None)
+                            try:
+                                df = pd.read_csv(par['excel'], header=None, encoding='latin1', sep=',', engine='python')
+                            except:
+                                df = pd.read_excel(par['excel'], header=None)
                             
-                            if len(df_excel.columns) >= 4:
-                                df_dados = df_excel.iloc[7:].copy()
+                            if len(df.columns) >= 4:
+                                # REVERTIDO E ALINHADO À FASE 1:
+                                # O Excel de Fase 1 gera: Coluna 0 (A) = Descrição / Coluna 1 (B) = Conta / Coluna 3 (D) = Valor
+                                df['Codigo_Limpo'] = df.iloc[:, 1].apply(limpar_codigo_bruto)
+                                df['Descricao_Excel'] = df.iloc[:, 0].astype(str).str.strip().str.upper()
+                                df['Valor_Limpo'] = df.iloc[:, 3].apply(limpar_valor)
                                 
-                                # Limpeza forçada (Extração Inteligente)
-                                df_dados['Codigo_Limpo'] = df_dados.iloc[:, 1].astype(str).apply(limpar_codigo_bruto)
-                                df_dados['Descricao_Excel'] = df_dados.iloc[:, 0].astype(str).str.strip().str.upper()
-                                df_dados['Valor_Limpo'] = df_dados.iloc[:, 3].apply(limpar_valor)
-                                
-                                # Conta 2042 (Mantida por segurança)
-                                mask_2042 = df_dados['Codigo_Limpo'] == '2042'
+                                # REVERTIDO: Retornando as travas exatas originais (2042 e 449)
+                                mask_2042 = df['Codigo_Limpo'] == '2042'
                                 if mask_2042.any():
-                                    saldo_2042 = df_dados.loc[mask_2042, 'Valor_Limpo'].sum()
+                                    saldo_2042 = df.loc[mask_2042, 'Valor_Limpo'].sum()
                                     if abs(saldo_2042) > 0.00: tem_2042_com_saldo = True
                                 
-                                # A MAGIA ACONTECE AQUI: Em vez de barrar apenas "449", aceitamos TUDO que tem um código preenchido!
-                                df_filtrado = df_dados[df_dados['Codigo_Limpo'] != ''].copy()
+                                mask_padrao = df['Codigo_Limpo'].str.startswith('449')
+                                df_dados = df[mask_padrao].copy()
+                                df_dados['Chave_Vinculo'] = df_dados['Codigo_Limpo'].apply(extrair_chave_vinculo)
                                 
-                                df_filtrado['Chave_Vinculo'] = df_filtrado['Codigo_Limpo'].apply(extrair_chave_vinculo)
-                                
-                                df_padrao = df_filtrado.groupby('Chave_Vinculo').agg({
+                                df_padrao = df_dados.groupby('Chave_Vinculo').agg({
                                     'Valor_Limpo': 'sum',
                                     'Descricao_Excel': 'first'
                                 }).reset_index()
@@ -370,10 +368,9 @@ if st.session_state.get('arquivos_memoria'):
                         soma_excel = final['Saldo_Excel'].sum()
                         dif_total = soma_pdf - soma_excel
 
-                        # Painel de Debug Atualizado
                         with st.expander("🛠️ Raio-X da Extração (Veja o que o sistema leu)"):
-                            st.write(f"**EXCEL:** Linhas totais lidas na Tabela: `{len(df_dados)}`")
-                            st.write(f"**EXCEL:** Contas válidas conciliadas: `{len(df_padrao)}`")
+                            st.write(f"**EXCEL:** Linhas totais processadas: `{len(df)}`")
+                            st.write(f"**EXCEL:** Contas válidas conciliadas (Filtro 449): `{len(df_padrao)}`")
                             st.write(f"**PDF:** Contas válidas extraídas do arquivo: `{len(df_pdf_final)}`")
 
                         col1, col2, col3 = st.columns(3)
