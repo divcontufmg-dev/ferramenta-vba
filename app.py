@@ -9,7 +9,6 @@ import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image
 from pytesseract import Output
-import xlsxwriter
 
 # ==========================================
 # CONFIGURAÇÃO INICIAL
@@ -71,7 +70,8 @@ class PDF_Report(FPDF):
 # ==========================================
 st.title("📊 Ferramenta Unificada: Preparador + Conciliador")
 st.markdown("""
-Esta versão atua em duas etapas isoladas em memória: primeiro emula a **macro VBA** que preparava e dividia as abas, empurrando as colunas corretamente, e depois roda o conciliador casando os arquivos virtuais com os PDFs.
+Aplica os filtros e o PROCV da Matriz diretamente na memória (usando a lógica do appr.py) 
+e repassa os saldos perfeitamente alinhados para o Conciliador com o PDF.
 """)
 st.markdown("---")
 
@@ -81,7 +81,7 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-if st.button("▶️ Iniciar Processamento Duplo", use_container_width=True, type="primary"):
+if st.button("▶️ Iniciar Processamento Inteligente", use_container_width=True, type="primary"):
     
     if not uploaded_files:
         st.warning("⚠️ Por favor, adicione os arquivos antes de processar.")
@@ -112,89 +112,39 @@ if st.button("▶️ Iniciar Processamento Duplo", use_container_width=True, typ
             st.error(f"❌ Erro ao ler MATRIZ.xlsx: {e}")
             st.stop()
 
-        # =========================================================================
-        # FASE 1: O PREPARADOR (Emulação Perfeita do VBA em Memória)
-        # =========================================================================
-        status_text.text("⚙️ FASE 1: Preparando planilhas, emulando o VBA e separando abas...")
-        planilhas_preparadas_memoria = {}
-        
+        # --- MAPEAMENTO DE ABAS VS PDFS ---
         xls_file = pd.ExcelFile(siafi_file)
+        pares = []
         
         for aba in xls_file.sheet_names:
             if aba.upper() == "MATRIZ": continue
             
-            siafi_file.seek(0)
-            df_raw = pd.read_excel(siafi_file, sheet_name=aba, header=None)
-            
-            if len(df_raw) >= 8:
-                # Cria a estrutura deslocada que o VBA fazia (Insere Coluna A vazia)
-                df_prepared = pd.DataFrame(index=df_raw.index)
-                df_prepared[0] = "" # Nova Coluna A (PROCV)
-                
-                # Desloca as colunas originais para a direita (A vira B, B vira C...)
-                for col in df_raw.columns:
-                    df_prepared[col + 1] = df_raw[col]
-                
-                # Mascara para isolar dados a partir da linha 8 (índice 7)
-                data_mask = df_prepared.index >= 7
-                
-                # Coluna B (agora índice 1) é o Código da Conta
-                df_prepared.loc[data_mask, 1] = pd.to_numeric(df_prepared.loc[data_mask, 1], errors='coerce')
-                
-                # Exclusão das contas
-                exclusion_list = [123110703, 123110402, 123119910]
-                linhas_para_excluir = data_mask & df_prepared[1].isin(exclusion_list)
-                df_prepared = df_prepared[~linhas_para_excluir]
-                
-                # Refaz a mascara após deletar linhas
-                data_mask = df_prepared.index >= 7
-                
-                # Aplica o PROCV na Nova Coluna A (índice 0)
-                desc_mapeada = df_prepared.loc[data_mask, 1].map(lookup_dict)
-                # Se não encontrar na Matriz, usa a descrição original (agora Coluna C, índice 2)
-                df_prepared.loc[data_mask, 0] = desc_mapeada.fillna(df_prepared.loc[data_mask, 2])
-                
-                # --- Criação do Arquivo Físico "Virtual" ---
-                virtual_excel = io.BytesIO()
-                with pd.ExcelWriter(virtual_excel, engine='xlsxwriter') as writer:
-                    df_prepared.to_excel(writer, index=False, header=False)
-                virtual_excel.seek(0)
-                
-                planilhas_preparadas_memoria[aba] = virtual_excel
-
-        # =========================================================================
-        # CASAMENTO DOS ARQUIVOS (Nome da Aba vs Nome do PDF)
-        # =========================================================================
-        pares = []
-        for aba, virtual_excel in planilhas_preparadas_memoria.items():
-            # Extrai o código da UG do nome da aba (ex: "153287FACULDADE" -> "153287")
             match = re.search(r'(\d+)', aba)
             if match:
                 ug = match.group(1)
-                # Procura PDF com este número
                 pdf_match = next((f for n, f in pdfs.items() if ug in n), None)
                 if pdf_match:
-                    pares.append({'ug': ug, 'nome_aba': aba, 'excel_virtual': virtual_excel, 'pdf': pdf_match})
+                    pares.append({'ug': ug, 'nome_aba': aba, 'pdf': pdf_match})
                 else:
                     logs.append(f"⚠️ Aba '{aba}' (UG {ug}): Faltando PDF correspondente.")
 
         if not pares:
-            st.error("❌ Nenhum par (Aba Preparada + PDF) foi identificado.")
+            st.error("❌ Nenhum par (Aba + PDF) foi identificado.")
             st.stop()
 
-        # =========================================================================
-        # FASE 2: O CONCILIADOR (Lendo exatamente nas posições do VBA)
-        # =========================================================================
         pdf_out = PDF_Report()
         pdf_out.add_page()
         st.markdown("---")
         st.subheader("🔍 Resultados da Análise")
         progresso = st.progress(0)
 
+        # =========================================================================
+        # PROCESSAMENTO CORE (PREPARADOR + CONCILIADOR EM MEMÓRIA)
+        # =========================================================================
         for idx, par in enumerate(pares):
             ug = par['ug']
             nome_aba = par['nome_aba']
-            status_text.text(f"⚙️ FASE 2: Conciliando UG {ug}...")
+            status_text.text(f"⚙️ Processando UG {ug}...")
             
             with st.container():
                 st.info(f"🏢 **Unidade Gestora: {ug} (Aba: {nome_aba})**")
@@ -203,41 +153,59 @@ if st.button("▶️ Iniciar Processamento Duplo", use_container_width=True, typ
                 saldo_2042 = 0.0
                 tem_2042_com_saldo = False
                 
-                # --- LEITURA DO EXCEL VIRTUAL (Como se fosse o original do usuário) ---
+                # --- FASE 1 & FASE 2: PREPARAR E EXTRAIR DADOS ---
                 try:
-                    excel_stream = par['excel_virtual']
-                    excel_stream.seek(0)
-                    df_aba = pd.read_excel(excel_stream, header=None)
+                    siafi_file.seek(0)
+                    df_raw = pd.read_excel(siafi_file, sheet_name=nome_aba, header=None)
                     
-                    df_data = df_aba.iloc[7:].copy()
-                    df_calc = pd.DataFrame()
-                    
-                    # ALINHAMENTO CORRETO PÓS-VBA:
-                    # 1 (B) -> Conta
-                    # 0 (A) -> Descrição (PROCV)
-                    # 3 (D) -> Valor Monetário
-                    df_calc['Codigo_Limpo'] = df_data[1].apply(limpar_codigo_bruto)
-                    df_calc['Descricao_Excel'] = df_data[0].astype(str).str.strip().str.upper()
-                    df_calc['Valor_Limpo'] = df_data[3].apply(limpar_valor)
-                    
-                    mask_2042 = df_calc['Codigo_Limpo'] == '2042'
-                    if mask_2042.any():
-                        saldo_2042 = df_calc.loc[mask_2042, 'Valor_Limpo'].sum()
-                        if abs(saldo_2042) > 0.00: tem_2042_com_saldo = True
-                    
-                    # Filtro Principal ('449')
-                    mask_padrao = df_calc['Codigo_Limpo'].str.startswith('449')
-                    df_dados = df_calc[mask_padrao].copy()
-                    
-                    df_dados['Chave_Vinculo'] = df_dados['Codigo_Limpo'].apply(extrair_chave_vinculo)
-                    df_padrao = df_dados.groupby('Chave_Vinculo').agg({
-                        'Valor_Limpo': 'sum',
-                        'Descricao_Excel': 'first'
-                    }).reset_index()
-                    df_padrao.columns = ['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa']
-                    
+                    if len(df_raw) >= 8:
+                        data_rows = df_raw.iloc[7:].copy()
+                        
+                        # 1. Aplicar a lógica exata do appr.py (Filtro e Limpeza)
+                        data_rows[0] = pd.to_numeric(data_rows[0], errors='coerce')
+                        exclusion_list = [123110703, 123110402, 123119910]
+                        data_rows = data_rows[~data_rows[0].isin(exclusion_list)]
+                        
+                        # 2. PROCV pela Matriz
+                        desc_mapeada = data_rows[0].map(lookup_dict)
+                        
+                        # 3. Montagem à prova de falhas para o Conciliador
+                        df_calc = pd.DataFrame()
+                        df_calc['Codigo_Limpo'] = data_rows[0].apply(limpar_codigo_bruto)
+                        
+                        # O appr.py mesclava a Nova Descrição com a antiga se não achasse.
+                        desc_orig = data_rows[1] if 1 in data_rows.columns else ""
+                        df_calc['Descricao_Excel'] = desc_mapeada.fillna(desc_orig).astype(str).str.strip().str.upper()
+                        
+                        # 4. Busca Intelingente de Saldo (Soma colunas 2, 3 e 4 para garantir que captura o valor)
+                        def extrair_saldo_seguro(row):
+                            v = 0.0
+                            for col_idx in [2, 3, 4]:
+                                if col_idx in row.index:
+                                    v += limpar_valor(row[col_idx])
+                            return v
+                            
+                        df_calc['Valor_Limpo'] = data_rows.apply(extrair_saldo_seguro, axis=1)
+                        
+                        # 5. Lógica da Conta Estoque 2042
+                        mask_2042 = df_calc['Codigo_Limpo'] == '2042'
+                        if mask_2042.any():
+                            saldo_2042 = df_calc.loc[mask_2042, 'Valor_Limpo'].sum()
+                            if abs(saldo_2042) > 0.00: tem_2042_com_saldo = True
+                        
+                        # 6. Filtro Principal do Conciliador ('449')
+                        mask_padrao = df_calc['Codigo_Limpo'].str.startswith('449')
+                        df_dados = df_calc[mask_padrao].copy()
+                        
+                        df_dados['Chave_Vinculo'] = df_dados['Codigo_Limpo'].apply(extrair_chave_vinculo)
+                        df_padrao = df_dados.groupby('Chave_Vinculo').agg({
+                            'Valor_Limpo': 'sum',
+                            'Descricao_Excel': 'first'
+                        }).reset_index()
+                        df_padrao.columns = ['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa']
+                        
                 except Exception as e:
-                    logs.append(f"❌ Erro na leitura do Excel Preparado da UG {ug}: {e}")
+                    logs.append(f"❌ Erro na leitura Excel da UG {ug}: {e}")
 
                 # --- LEITURA DO PDF ---
                 df_pdf_final = pd.DataFrame()
