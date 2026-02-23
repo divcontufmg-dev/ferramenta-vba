@@ -14,7 +14,7 @@ from pytesseract import Output
 # CONFIGURAÇÃO INICIAL
 # ==========================================
 st.set_page_config(
-    page_title="Conciliador RMB x SIAFI (Tradução Direta)",
+    page_title="Conciliador RMB x SIAFI (Motor Inteligente)",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -30,7 +30,7 @@ hide_streamlit_style = """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # ==========================================
-# FUNÇÕES CORE (LÓGICA INVERSA)
+# FUNÇÕES CORE (LÓGICA BLINDADA)
 # ==========================================
 def limpar_valor(v):
     if v is None or pd.isna(v): return 0.0
@@ -48,24 +48,62 @@ def limpar_codigo_bruto(v):
         return s
     except: return ""
 
-def extrair_chave_via_matriz(codigo_original, dict_matriz):
+def extrair_chave_universal(codigo_original, dict_matriz):
     """
-    Lógica Nova: Pega o código da planilha (ex: 123110102),
-    busca na matriz (ex: acha 44905206) e retorna os últimos 2 dígitos (06).
+    Motor universal que garante a chave de 2 dígitos correta, 
+    sem gerar números aleatórios.
     """
-    codigo_original = str(codigo_original).strip()
-    if not codigo_original or codigo_original == '0':
+    codigo = str(codigo_original).strip()
+    if not codigo or codigo == '0' or codigo == '2042':
         return None
         
-    valor_matriz = str(dict_matriz.get(codigo_original, "")).strip()
-    
-    # Procura um código que comece com 449 na resposta da matriz
-    match = re.search(r'(449\d+)', valor_matriz)
-    if match:
-        codigo_encontrado = match.group(1)
-        return int(codigo_encontrado[-2:]) # Pega apenas os 2 últimos
-    
+    # 1. Já é código de 2 dígitos? (Ex: 07, 16)
+    if len(codigo) <= 2 and codigo.isdigit():
+        return int(codigo)
+        
+    # 2. Já começa com 449 ou 339? (Pega os 2 últimos dígitos)
+    if (codigo.startswith('449') or codigo.startswith('339')) and len(codigo) >= 4:
+        return int(codigo[-2:])
+        
+    # 3. Consulta a MATRIZ para traduzir o 123...
+    if codigo in dict_matriz:
+        valor_matriz = str(dict_matriz[codigo]).strip()
+        match = re.search(r'((?:449|339)\d+)', valor_matriz)
+        if match:
+            return int(match.group(1)[-2:])
+        if len(valor_matriz) <= 2 and valor_matriz.isdigit():
+            return int(valor_matriz)
+            
     return None
+
+def identificar_estrutura_excel(df_raw):
+    """
+    Radar que descobre sozinho onde estão as colunas, 
+    evitando que a descrição vire código numérico.
+    """
+    start_row = -1
+    col_conta = -1
+    col_desc = -1
+    
+    for i in range(min(15, len(df_raw))):
+        val0 = str(df_raw.iloc[i, 0]).strip().replace('.0', '')
+        val1 = str(df_raw.iloc[i, 1]).strip().replace('.0', '') if len(df_raw.columns) > 1 else ""
+        
+        # Procura a primeira linha onde tem número de conta válido
+        if (val0.isdigit() and len(val0) >= 2) or (val1.isdigit() and len(val1) >= 2):
+            start_row = i
+            if val0.isdigit() and not val1.isdigit():
+                col_conta = 0
+                col_desc = 1
+            elif val1.isdigit() and not val0.isdigit():
+                col_conta = 1
+                col_desc = 0
+            else:
+                col_conta = 0
+                col_desc = 1
+            break
+            
+    return start_row, col_conta, col_desc
 
 def formatar_real(valor):
     return f"{valor:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
@@ -82,15 +120,15 @@ class PDF_Report(FPDF):
 # ==========================================
 # INTERFACE DO USUÁRIO
 # ==========================================
-st.title("📊 Conciliador RMB x SIAFI (Tradução via Matriz)")
+st.title("📊 Conciliador RMB x SIAFI (Motor Inteligente)")
 st.markdown("""
-**Novo Motor de Leitura:** O sistema agora faz a tradução simultânea das chaves usando a MATRIZ como dicionário, lendo as colunas originais do SIAFI (Código na Coluna A, Descrição na Coluna B, Valor na Coluna C) sem alterar a estrutura da planilha.
+**Novo Radar de Colunas:** Pode enviar a planilha **Bruta** ou a que já passou pela **Fase 1**. O sistema descobre sozinho as colunas de Conta e Descrição sem embaralhar os dados!
 """)
 st.markdown("---")
 
 col_upload1, col_upload2 = st.columns(2)
 with col_upload1:
-    uploaded_siafi = st.file_uploader("1. Planilha Principal SIAFI Bruta (.xlsx)", type=["xlsx"])
+    uploaded_siafi = st.file_uploader("1. Planilha Principal SIAFI (.xlsx)", type=["xlsx"])
 with col_upload2:
     uploaded_pdfs = st.file_uploader("2. Relatórios RMB (.pdf)", accept_multiple_files=True, type=['pdf'])
 
@@ -110,11 +148,14 @@ if st.button("🚀 Iniciar Auditoria", type="primary", use_container_width=True)
         progresso = st.progress(0)
         status_text = st.empty()
         
-        # 1. Carregar a Matriz como Dicionário Seguro
+        # 1. Carregar a Matriz
         try:
-            df_matriz = pd.read_excel("MATRIZ.xlsx", usecols="A:B", header=None)
-            # Transforma tudo em texto limpo para evitar erros de tipagem
-            lookup_dict = {str(k).strip(): str(v).strip() for k, v in zip(df_matriz[0], df_matriz[1])}
+            df_matriz = pd.read_excel("MATRIZ.xlsx", header=None)
+            # Garantir que a chave seja o 123... independente da ordem das colunas da matriz
+            if '449' in str(df_matriz.iloc[0, 0]):
+                lookup_dict = {str(k).strip(): str(v).strip() for k, v in zip(df_matriz[1], df_matriz[0])}
+            else:
+                lookup_dict = {str(k).strip(): str(v).strip() for k, v in zip(df_matriz[0], df_matriz[1])}
         except Exception as e:
             st.error(f"Erro ao ler a MATRIZ.xlsx: {e}")
             st.stop()
@@ -141,7 +182,7 @@ if st.button("🚀 Iniciar Auditoria", type="primary", use_container_width=True)
             st.stop()
 
         if not pares:
-            st.error("❌ Nenhum par completo (Aba SIAFI + PDF) foi identificado.")
+            st.error("❌ Nenhum par completo foi identificado.")
         else:
             pdf_out = PDF_Report()
             pdf_out.add_page()
@@ -155,7 +196,7 @@ if st.button("🚀 Iniciar Auditoria", type="primary", use_container_width=True)
                     st.info(f"🏢 **Unidade Gestora: {ug}**")
                     
                     # ==========================================
-                    # LEITURA DO EXCEL (Caminho Inverso / Tradução)
+                    # LEITURA DO EXCEL
                     # ==========================================
                     df_padrao = pd.DataFrame()
                     saldo_2042 = 0.0
@@ -164,36 +205,39 @@ if st.button("🚀 Iniciar Auditoria", type="primary", use_container_width=True)
                     try:
                         df_raw = pd.read_excel(xls_file, sheet_name=par['sheet_name'], header=None)
                         
-                        if len(df_raw) >= 8:
-                            # Isola os dados a partir da linha 8
-                            df_dados = df_raw.iloc[7:].copy()
+                        start_row, col_conta, col_desc = identificar_estrutura_excel(df_raw)
+                        
+                        if start_row != -1:
+                            df_dados = df_raw.iloc[start_row:].copy()
                             
-                            # Mapeamento de Colunas Solicitado: A(0)=Código, B(1)=Descrição, C(2)=Valor
-                            df_dados['Codigo_Siafi'] = df_dados.iloc[:, 0].apply(limpar_codigo_bruto)
-                            df_dados['Descricao_Planilha'] = df_dados.iloc[:, 1].astype(str).str.strip().str.upper()
+                            df_dados['Codigo_Siafi'] = df_dados.iloc[:, col_conta].apply(limpar_codigo_bruto)
+                            df_dados['Descricao_Planilha'] = df_dados.iloc[:, col_desc].astype(str).str.strip().str.upper()
                             
-                            # Tenta ler a Coluna C(2), se por acaso o valor estiver na D(3) ele salva também
-                            def pegar_valor(row):
-                                val = limpar_valor(row.iloc[2]) if len(row) > 2 else 0.0
-                                if val == 0.0 and len(row) > 3: val = limpar_valor(row.iloc[3])
-                                return val
+                            # O Valor fica na C(2) da Bruta ou D(3) da Fase 1
+                            def extract_value(row):
+                                col_idx = 3 if col_conta == 1 else 2
+                                try:
+                                    if col_idx < len(row):
+                                        val = limpar_valor(row.iloc[col_idx])
+                                        if abs(val) > 0.0: return val
+                                except: pass
+                                return limpar_valor(row.iloc[-1]) # Tenta a última coluna
+                                
+                            df_dados['Valor_Siafi'] = df_dados.apply(extract_value, axis=1)
                             
-                            df_dados['Valor_Siafi'] = df_dados.apply(pegar_valor, axis=1)
-                            
-                            # Exclusões
+                            # Exclusões base (Garante não apagar os 07, 16 etc se for consumo)
                             exclusion_list = ['123110703', '123110402', '123119910']
                             df_dados = df_dados[~df_dados['Codigo_Siafi'].isin(exclusion_list)].copy()
                             
-                            # Verifica Estoque Interno (2042)
+                            # Estoque Interno 2042
                             mask_2042 = df_dados['Codigo_Siafi'] == '2042'
                             if mask_2042.any():
                                 saldo_2042 = df_dados.loc[mask_2042, 'Valor_Siafi'].sum()
                                 if abs(saldo_2042) > 0.00: tem_2042_com_saldo = True
                             
-                            # APICA A TRADUÇÃO: Busca o código na Matriz e extrai a chave (ex: 06)
-                            df_dados['Chave_Vinculo'] = df_dados['Codigo_Siafi'].apply(lambda c: extrair_chave_via_matriz(c, lookup_dict))
+                            # APLICA A TRADUÇÃO MATRIZ -> CHAVE
+                            df_dados['Chave_Vinculo'] = df_dados['Codigo_Siafi'].apply(lambda c: extrair_chave_universal(c, lookup_dict))
                             
-                            # Remove as linhas que não viraram chave (que não tinham 449 na Matriz)
                             df_dados_filtrados = df_dados.dropna(subset=['Chave_Vinculo']).copy()
                             
                             if not df_dados_filtrados.empty:
@@ -201,16 +245,16 @@ if st.button("🚀 Iniciar Auditoria", type="primary", use_container_width=True)
                                 
                                 df_padrao = df_dados_filtrados.groupby('Chave_Vinculo').agg({
                                     'Valor_Siafi': 'sum',
-                                    'Descricao_Planilha': 'first' # Mantém a descrição da coluna B da planilha
+                                    'Descricao_Planilha': 'first'
                                 }).reset_index()
                                 
                                 df_padrao.columns = ['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa']
 
                     except Exception as e:
-                        logs.append(f"❌ Erro na leitura do SIAFI UG {ug}: {e}")
+                        logs.append(f"❌ Erro no SIAFI UG {ug}: {e}")
 
                     # ==========================================
-                    # LEITURA DO PDF
+                    # LEITURA DO PDF (Com Trava contra números de linha)
                     # ==========================================
                     df_pdf_final = pd.DataFrame()
                     dados_pdf = []
@@ -223,25 +267,16 @@ if st.button("🚀 Iniciar Auditoria", type="primary", use_container_width=True)
                             for page in p_doc.pages:
                                 txt = page.extract_text()
                                 is_ocr = False
-                                tem_dados_validos = False
                                 
-                                if txt and re.search(r'\d{1,3}(?:[.,]\d{3})*[.,]\d{2}', txt): tem_dados_validos = True
-                                
-                                if not txt or not tem_dados_validos or len(txt) < 50:
+                                if not txt or len(txt) < 50:
                                     is_ocr = True
                                     try:
                                         imagens = convert_from_bytes(pdf_bytes, first_page=page.page_number, last_page=page.page_number, dpi=300)
                                         if imagens:
-                                            img = imagens[0]
-                                            try:
-                                                osd = pytesseract.image_to_osd(img, output_type=Output.DICT)
-                                                if osd['rotate'] != 0: img = img.rotate(-osd['rotate'], expand=True)
-                                            except: pass
-                                            txt = pytesseract.image_to_string(img, lang='por', config='--psm 6')
-                                    except Exception: pass
+                                            txt = pytesseract.image_to_string(imagens[0], lang='por', config='--psm 6')
+                                    except: pass
 
                                 if not txt: continue
-                                if "SINTÉTICO PATRIMONIAL" not in txt.upper(): continue
                                 if "DE ENTRADAS" in txt.upper() or "DE SAÍDAS" in txt.upper(): continue
 
                                 for line in txt.split('\n'):
@@ -255,11 +290,21 @@ if st.button("🚀 Iniciar Auditoria", type="primary", use_container_width=True)
                                             vals = re.findall(r'([0-9]{1,3}(?:[.,][0-9]{3})*[.,]\d{2})', line)
                                         
                                         if len(vals) >= 4:
-                                            chave_match = re.match(r'^"?(\d+)', line)
-                                            if chave_match:
-                                                chave_raw = chave_match.group(1)
+                                            chave_final = None
+                                            # Busca o código completo da conta no meio da frase para não ser enganado pelo OCR
+                                            match_longo = re.search(r'\b((?:449|339)\d{5,})\b', line)
+                                            
+                                            if match_longo:
+                                                chave_final = int(match_longo.group(1)[-2:])
+                                            else:
+                                                chave_match = re.match(r'^"?(\d+)', line)
+                                                if chave_match:
+                                                    c_raw = chave_match.group(1)
+                                                    chave_final = int(c_raw[-2:]) if len(c_raw) >= 4 else int(c_raw)
+                                                    
+                                            if chave_final is not None:
                                                 dados_pdf.append({
-                                                    'Chave_Vinculo': int(chave_raw),
+                                                    'Chave_Vinculo': chave_final,
                                                     'Saldo_PDF': limpar_valor(vals[-4])
                                                 })
                         if dados_pdf:
@@ -273,8 +318,7 @@ if st.button("🚀 Iniciar Auditoria", type="primary", use_container_width=True)
                     if df_pdf_final.empty: df_pdf_final = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_PDF'])
 
                     final = pd.merge(df_pdf_final, df_padrao, on='Chave_Vinculo', how='outer').fillna(0)
-                    
-                    final['Descricao'] = final.apply(lambda x: x['Descricao_Completa'] if pd.notna(x['Descricao_Completa']) and str(x['Descricao_Completa']).strip() != '0' else "ITEM SEM DESCRIÇÃO NO SIAFI", axis=1)
+                    final['Descricao'] = final.apply(lambda x: x['Descricao_Completa'] if pd.notna(x['Descricao_Completa']) and str(x['Descricao_Completa']).strip() != '0' else "ITEM SEM DESCRIÇÃO", axis=1)
                     final['Diferenca'] = (final['Saldo_PDF'] - final['Saldo_Excel']).round(2)
                     divergencias = final[abs(final['Diferenca']) > 0.05].copy()
 
@@ -284,9 +328,9 @@ if st.button("🚀 Iniciar Auditoria", type="primary", use_container_width=True)
 
                     # --- EXIBIÇÃO ---
                     with st.expander("🛠️ Raio-X da Extração (Log de Auditoria)"):
-                        st.write(f"**Matriz carregada:** `{len(lookup_dict)}` códigos.")
-                        st.write(f"**EXCEL:** Contas válidas conciliadas via tradução de Matriz: `{len(df_padrao)}`")
-                        st.write(f"**PDF:** Contas válidas extraídas do arquivo: `{len(df_pdf_final)}`")
+                        st.write(f"**EXCEL:** Padrão detectado - Código na Coluna `{col_conta}`, Descrição na `{col_desc}`.")
+                        st.write(f"**EXCEL:** Contas válidas extraídas: `{len(df_padrao)}`")
+                        st.write(f"**PDF:** Contas válidas extraídas: `{len(df_pdf_final)}`")
 
                     col1, col2, col3 = st.columns(3)
                     col1.metric("Total RMB (PDF)", f"R$ {soma_pdf:,.2f}")
