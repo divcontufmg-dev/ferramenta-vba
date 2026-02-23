@@ -30,7 +30,7 @@ hide_streamlit_style = """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # ==========================================
-# FUNÇÕES E CLASSES MANTIDAS
+# FUNÇÕES E CLASSES MANTIDAS (CÓDIGOS ORIGINAIS)
 # ==========================================
 
 def limpar_valor(v):
@@ -70,13 +70,13 @@ class PDF_Report(FPDF):
 # ==========================================
 st.title("📊 Ferramenta Unificada: Conciliador RMB x SIAFI")
 st.markdown("""
-Lê a planilha completa (todas as abas), aplica os filtros/PROCV da MATRIZ (sem alterar a estrutura) e faz a conciliação automática com o PDF.
+Lê a planilha completa (varrendo todas as abas), aplica os filtros/PROCV da MATRIZ de forma dinâmica e faz a conciliação automática com o PDF correspondente de cada aba.
 """)
 st.markdown("---")
 
 st.subheader("📂 Área de Arquivos")
 uploaded_files = st.file_uploader(
-    "Arraste a Planilha SIAFI completa e os arquivos PDF (RMB):", 
+    "Arraste a Planilha SIAFI completa (com abas) e os arquivos PDF (RMB):", 
     accept_multiple_files=True
 )
 
@@ -90,7 +90,7 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
         logs = []
         
         pdfs = {f.name: f for f in uploaded_files if f.name.lower().endswith('.pdf')}
-        excels = [f for f in uploaded_files if f.name.lower().endswith(('.xlsx', '.xls', '.csv'))]
+        excels = [f for f in uploaded_files if f.name.lower().endswith(('.xlsx', '.xls'))]
         siafi_file = next((f for f in excels), None)
 
         if not siafi_file:
@@ -105,7 +105,8 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
         try:
             df_matriz = pd.read_excel("MATRIZ.xlsx", usecols="A:B", header=None)
             df_matriz.columns = ['Chave', 'Descricao']
-            df_matriz['Chave'] = pd.to_numeric(df_matriz['Chave'], errors='coerce')
+            # Garante que a chave da matriz seja uma string limpa para não falhar o cruzamento
+            df_matriz['Chave'] = df_matriz['Chave'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
             df_matriz = df_matriz.drop_duplicates(subset=['Chave'], keep='first')
             lookup_dict = dict(zip(df_matriz['Chave'], df_matriz['Descricao']))
         except Exception as e:
@@ -122,7 +123,8 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
             match = re.search(r'(\d+)', aba)
             if match:
                 ug = match.group(1)
-                pdf_match = next((f for n, f in pdfs.items() if n.startswith(ug)), None)
+                # Verifica se o UG está no nome do PDF
+                pdf_match = next((f for n, f in pdfs.items() if ug in n), None)
                 if pdf_match:
                     pares.append({'ug': ug, 'nome_aba': aba, 'pdf': pdf_match})
                 else:
@@ -150,40 +152,35 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
                 saldo_2042 = 0.0
                 tem_2042_com_saldo = False
                 
-                # --- PREPARAÇÃO EXCEL (Código 1) + CONCILIAÇÃO (Código 2) ---
+                # --- PREPARAÇÃO EXCEL E CONCILIAÇÃO ---
                 try:
                     siafi_file.seek(0)
+                    # Lê a aba inteira sem pular linhas (ignora o erro de cabeçalhos pequenos)
                     df_raw = pd.read_excel(siafi_file, sheet_name=nome_aba, header=None)
                     
-                    if len(df_raw) >= 8:
-                        # Extrai os dados a partir da linha 8
-                        data_rows = df_raw.iloc[7:].copy()
-                        
-                        # [Código 1] Garante que a coluna 0 (Conta) seja número para os filtros
-                        data_rows[0] = pd.to_numeric(data_rows[0], errors='coerce')
-                        
-                        # [Código 1] Exclui contas
-                        exclusion_list = [123110703, 123110402, 123119910]
-                        data_rows = data_rows[~data_rows[0].isin(exclusion_list)]
-                        
-                        # [Código 1 Corrigido] Faz o PROCV e sobrepõe na coluna 2 sem alterar a ordem
-                        desc_mapeada = data_rows[0].map(lookup_dict)
-                        data_rows[2] = desc_mapeada.fillna(data_rows[2])
-                        
-                        # [Código 2] Lê exatamente nas posições esperadas originais: 
-                        # Coluna 0 (Código), Coluna 2 (Descrição), Coluna 3 (Valor)
+                    if not df_raw.empty and len(df_raw.columns) >= 4:
                         df_calc = pd.DataFrame()
-                        df_calc['Codigo_Limpo'] = data_rows[0].apply(limpar_codigo_bruto)
-                        df_calc['Descricao_Excel'] = data_rows[2].astype(str).str.strip().str.upper()
-                        df_calc['Valor_Limpo'] = data_rows[3].apply(limpar_valor)
                         
-                        # Captura Conta 2042
+                        # 1. Extração bruta exata das posições originais da Ferramenta 2
+                        df_calc['Codigo_Limpo'] = df_raw.iloc[:, 0].apply(limpar_codigo_bruto) # Coluna A
+                        df_calc['Descricao_Original'] = df_raw.iloc[:, 2].astype(str).str.strip().str.upper() # Coluna C
+                        df_calc['Valor_Limpo'] = df_raw.iloc[:, 3].apply(limpar_valor) # Coluna D
+                        
+                        # 2. Exclusão das contas (Regra Ferramenta 1)
+                        exclusion_list = ['123110703', '123110402', '123119910']
+                        df_calc = df_calc[~df_calc['Codigo_Limpo'].isin(exclusion_list)]
+                        
+                        # 3. PROCV (Substitui pela descrição da MATRIZ se existir)
+                        df_calc['Nova_Descricao'] = df_calc['Codigo_Limpo'].map(lookup_dict)
+                        df_calc['Descricao_Excel'] = df_calc['Nova_Descricao'].fillna(df_calc['Descricao_Original']).astype(str).str.upper()
+                        
+                        # 4. Captura a Conta 2042 de estoque
                         mask_2042 = df_calc['Codigo_Limpo'] == '2042'
                         if mask_2042.any():
                             saldo_2042 = df_calc.loc[mask_2042, 'Valor_Limpo'].sum()
                             if abs(saldo_2042) > 0.00: tem_2042_com_saldo = True
                         
-                        # Aplica filtro para 449
+                        # 5. Aplica filtro principal para conciliação ('449')
                         mask_padrao = df_calc['Codigo_Limpo'].str.startswith('449')
                         df_dados = df_calc[mask_padrao].copy()
                         
@@ -193,11 +190,10 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
                             'Descricao_Excel': 'first'
                         }).reset_index()
                         df_padrao.columns = ['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa']
-
                 except Exception as e:
                     logs.append(f"❌ Erro na leitura Excel da UG {ug}: {e}")
 
-                # --- LEITURA DO PDF (Intacta do Código 2) ---
+                # --- LEITURA DO PDF (MANTIDA INTACTA) ---
                 df_pdf_final = pd.DataFrame()
                 dados_pdf = []
                 
@@ -255,7 +251,7 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
                 except Exception as e:
                     logs.append(f"❌ Erro Leitura PDF UG {ug}: {e}")
 
-                # --- COMPARATIVO FINAL E RELATÓRIO ---
+                # --- COMPARATIVO FINAL ---
                 if df_padrao.empty: df_padrao = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa'])
                 if df_pdf_final.empty: df_pdf_final = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_PDF'])
 
