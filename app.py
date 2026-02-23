@@ -268,6 +268,7 @@ if st.session_state.get('arquivos_memoria'):
                         df_padrao = pd.DataFrame()
                         saldo_2042 = 0.0
                         tem_2042_com_saldo = False
+                        df_dados = pd.DataFrame() # Inicializa vazio para evitar erros no Raio-X
                         
                         try:
                             par['excel'].seek(0)
@@ -281,13 +282,15 @@ if st.session_state.get('arquivos_memoria'):
                                 df_dados['Descricao_Excel'] = df_dados.iloc[:, 0].astype(str).str.strip().str.upper()
                                 df_dados['Valor_Limpo'] = df_dados.iloc[:, 3].apply(limpar_valor)
                                 
+                                # Conta 2042 (Mantida por segurança)
                                 mask_2042 = df_dados['Codigo_Limpo'] == '2042'
                                 if mask_2042.any():
                                     saldo_2042 = df_dados.loc[mask_2042, 'Valor_Limpo'].sum()
                                     if abs(saldo_2042) > 0.00: tem_2042_com_saldo = True
                                 
-                                mask_padrao = df_dados['Codigo_Limpo'].str.startswith('449')
-                                df_filtrado = df_dados[mask_padrao].copy()
+                                # A MAGIA ACONTECE AQUI: Em vez de barrar apenas "449", aceitamos TUDO que tem um código preenchido!
+                                df_filtrado = df_dados[df_dados['Codigo_Limpo'] != ''].copy()
+                                
                                 df_filtrado['Chave_Vinculo'] = df_filtrado['Codigo_Limpo'].apply(extrair_chave_vinculo)
                                 
                                 df_padrao = df_filtrado.groupby('Chave_Vinculo').agg({
@@ -332,7 +335,6 @@ if st.session_state.get('arquivos_memoria'):
 
                                     for line in txt.split('\n'):
                                         line = line.strip()
-                                        # Regex corrigido: Não obriga ter espaço após o código numérico
                                         if re.match(r'^"?\d+', line):
                                             vals = []
                                             if is_ocr:
@@ -359,7 +361,6 @@ if st.session_state.get('arquivos_memoria'):
 
                         final = pd.merge(df_pdf_final, df_padrao, on='Chave_Vinculo', how='outer').fillna(0)
                         
-                        # Correção de exibição de descrição caso seja vazio
                         final['Descricao'] = final.apply(lambda x: x['Descricao_Completa'] if pd.notna(x['Descricao_Completa']) and str(x['Descricao_Completa']).strip() != '0' else "ITEM SEM DESCRIÇÃO", axis=1)
                         final['Diferenca'] = (final['Saldo_PDF'] - final['Saldo_Excel']).round(2)
                         divergencias = final[abs(final['Diferenca']) > 0.05].copy()
@@ -369,10 +370,10 @@ if st.session_state.get('arquivos_memoria'):
                         soma_excel = final['Saldo_Excel'].sum()
                         dif_total = soma_pdf - soma_excel
 
-                        # Painel de Debug (Raio-X)
+                        # Painel de Debug Atualizado
                         with st.expander("🛠️ Raio-X da Extração (Veja o que o sistema leu)"):
-                            st.write(f"**EXCEL:** Linhas com valores lidas na Tabela: `{len(df_dados) if not df_padrao.empty else 0}`")
-                            st.write(f"**EXCEL:** Contas Bens Móveis (Série 449) filtradas: `{len(df_padrao)}`")
+                            st.write(f"**EXCEL:** Linhas totais lidas na Tabela: `{len(df_dados)}`")
+                            st.write(f"**EXCEL:** Contas válidas conciliadas: `{len(df_padrao)}`")
                             st.write(f"**PDF:** Contas válidas extraídas do arquivo: `{len(df_pdf_final)}`")
 
                         col1, col2, col3 = st.columns(3)
