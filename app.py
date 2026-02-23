@@ -9,6 +9,7 @@ import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image
 from pytesseract import Output
+import xlsxwriter
 
 # ==========================================
 # CONFIGURAÇÃO INICIAL
@@ -30,7 +31,7 @@ hide_streamlit_style = """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # ==========================================
-# FUNÇÕES E CLASSES
+# FUNÇÕES E CLASSES (FERRAMENTA 2)
 # ==========================================
 
 def limpar_valor(v):
@@ -66,29 +67,30 @@ class PDF_Report(FPDF):
         self.cell(0, 10, f'Página {self.page_no()}', align='C')
 
 # ==========================================
-# INTERFACE E PROCESSAMENTO
+# INTERFACE PRINCIPAL
 # ==========================================
-st.title("📊 Ferramenta Unificada: Conciliador RMB x SIAFI")
+st.title("📊 Ferramenta Unificada: Preparador + Conciliador")
 st.markdown("""
-A ferramenta agora lê os dados exatamente na posição original que a sua macro VBA lia, aplicando a Matriz e a Conciliação em uma única etapa inteligente.
+O sistema executa os dois processos de forma sequencial e independente em memória: 
+prepara a planilha com a MATRIZ, guarda o resultado internamente e depois concilia com os PDFs.
 """)
 st.markdown("---")
 
 st.subheader("📂 Área de Arquivos")
 uploaded_files = st.file_uploader(
-    "Arraste a Planilha SIAFI completa (com abas) e os arquivos PDF (RMB):", 
+    "Arraste a Planilha SIAFI completa (com abas) e os PDFs do RMB:", 
     accept_multiple_files=True
 )
 
-if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary"):
+if st.button("▶️ Iniciar Processamento Duplo", use_container_width=True, type="primary"):
     
     if not uploaded_files:
         st.warning("⚠️ Por favor, adicione os arquivos antes de processar.")
     else:
-        progresso = st.progress(0)
         status_text = st.empty()
         logs = []
         
+        # Identificação dos ficheiros
         pdfs = {f.name: f for f in uploaded_files if f.name.lower().endswith('.pdf')}
         excels = [f for f in uploaded_files if f.name.lower().endswith(('.xlsx', '.xls'))]
         siafi_file = next((f for f in excels), None)
@@ -97,9 +99,9 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
             st.error("❌ A Planilha SIAFI não foi anexada.")
             st.stop()
 
-        # === 1. LER MATRIZ.XLSX ===
+        # --- CARREGAR MATRIZ ---
         if not os.path.exists("MATRIZ.xlsx"):
-            st.error("❌ O arquivo 'MATRIZ.xlsx' não foi encontrado na pasta do sistema.")
+            st.error("❌ O arquivo 'MATRIZ.xlsx' não foi encontrado.")
             st.stop()
             
         try:
@@ -112,36 +114,77 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
             st.error(f"❌ Erro ao ler MATRIZ.xlsx: {e}")
             st.stop()
 
-        # === 2. MAPEAR ABAS DO EXCEL E PDFs ===
+        # =========================================================================
+        # FASE 1: O PREPARADOR (Atuando de forma independente e guardando na memória)
+        # =========================================================================
+        status_text.text("⚙️ FASE 1: Preparando planilhas e aplicando MATRIZ...")
+        planilhas_preparadas_memoria = {}
+        
         xls_file = pd.ExcelFile(siafi_file)
-        pares = []
         
         for aba in xls_file.sheet_names:
             if aba.upper() == "MATRIZ": continue
             
+            siafi_file.seek(0)
+            df_raw = pd.read_excel(siafi_file, sheet_name=aba, header=None)
+            
+            if len(df_raw) >= 8:
+                # Separa cabeçalho e dados assim como o Código 1
+                header_rows = df_raw.iloc[:7].copy()
+                data_rows = df_raw.iloc[7:].copy()
+                
+                # --- Lógica Fiel do Preparador ---
+                data_rows[0] = pd.to_numeric(data_rows[0], errors='coerce')
+                
+                # Filtro de Exclusão
+                exclusion_list = [123110703, 123110402, 123119910]
+                data_rows = data_rows[~data_rows[0].isin(exclusion_list)]
+                
+                # PROCV
+                desc_mapeada = data_rows[0].map(lookup_dict)
+                data_rows[2] = desc_mapeada.fillna(data_rows[2])
+                
+                # --- Criação do "Ficheiro Virtual" ---
+                # Isto garante que a Ferramenta 2 leia os dados como se o ficheiro tivesse sido descarregado
+                virtual_excel = io.BytesIO()
+                with pd.ExcelWriter(virtual_excel, engine='xlsxwriter') as writer:
+                    header_rows.to_excel(writer, sheet_name=aba, startrow=0, startcol=0, index=False, header=False)
+                    data_rows.to_excel(writer, sheet_name=aba, startrow=7, startcol=0, index=False, header=False)
+                virtual_excel.seek(0)
+                
+                planilhas_preparadas_memoria[aba] = virtual_excel
+
+        # =========================================================================
+        # MAPEAMENTO PARA A FASE 2
+        # =========================================================================
+        pares = []
+        for aba, virtual_excel in planilhas_preparadas_memoria.items():
             match = re.search(r'(\d+)', aba)
             if match:
                 ug = match.group(1)
                 pdf_match = next((f for n, f in pdfs.items() if ug in n), None)
                 if pdf_match:
-                    pares.append({'ug': ug, 'nome_aba': aba, 'pdf': pdf_match})
+                    pares.append({'ug': ug, 'nome_aba': aba, 'excel_virtual': virtual_excel, 'pdf': pdf_match})
                 else:
                     logs.append(f"⚠️ Aba '{aba}' (UG {ug}): Faltando PDF correspondente.")
 
         if not pares:
-            st.error("❌ Nenhum par (Aba Planilha + PDF) foi identificado.")
+            st.error("❌ Nenhum par (Aba Preparada + PDF) foi identificado.")
             st.stop()
 
+        # =========================================================================
+        # FASE 2: O CONCILIADOR (Lê o arquivo virtual independentemente)
+        # =========================================================================
         pdf_out = PDF_Report()
         pdf_out.add_page()
         st.markdown("---")
         st.subheader("🔍 Resultados da Análise")
+        progresso = st.progress(0)
 
-        # === 3. PROCESSAMENTO INTEGRADO ABA POR ABA ===
         for idx, par in enumerate(pares):
             ug = par['ug']
             nome_aba = par['nome_aba']
-            status_text.text(f"Processando Aba '{nome_aba}' (UG {ug})...")
+            status_text.text(f"⚙️ FASE 2: Conciliando Aba '{nome_aba}' (UG {ug})...")
             
             with st.container():
                 st.info(f"🏢 **Unidade Gestora: {ug} (Aba: {nome_aba})**")
@@ -150,53 +193,41 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
                 saldo_2042 = 0.0
                 tem_2042_com_saldo = False
                 
-                # --- PREPARAÇÃO DO EXCEL ---
+                # --- LEITURA DO EXCEL VIRTUAL (Como se fosse ficheiro físico) ---
                 try:
-                    siafi_file.seek(0)
-                    df_raw = pd.read_excel(siafi_file, sheet_name=nome_aba, header=None)
+                    excel_stream = par['excel_virtual']
+                    excel_stream.seek(0)
+                    # O código original do conciliador lia tudo com header=None e começava a filtrar na linha 7
+                    df_aba = pd.read_excel(excel_stream, header=None)
+                    df_data = df_aba.iloc[7:].copy()
                     
-                    if len(df_raw) >= 8:
-                        # O VBA original começava a ler a partir da linha 8 (índice 7 no Python)
-                        df_data = df_raw.iloc[7:].copy()
-                        
-                        df_calc = pd.DataFrame()
-                        
-                        # ALINHAMENTO EXATO REVELADO PELO VBA (ANTES DO INSERT DA COLUNA A)
-                        # Coluna 0 (A) -> Código da Conta
-                        # Coluna 1 (B) -> Descrição Original
-                        # Coluna 2 (C) -> Valor Monetário
-                        df_calc['Codigo_Limpo'] = df_data.iloc[:, 0].apply(limpar_codigo_bruto)
-                        df_calc['Descricao_Original'] = df_data.iloc[:, 1].astype(str).str.strip().str.upper()
-                        df_calc['Valor_Limpo'] = df_data.iloc[:, 2].apply(limpar_valor)
-                        
-                        # Exclusão das contas (Regra da Ferramenta 1)
-                        exclusion_list = ['123110703', '123110402', '123119910']
-                        df_calc = df_calc[~df_calc['Codigo_Limpo'].isin(exclusion_list)]
-                        
-                        # PROCV Automático da MATRIZ
-                        df_calc['Nova_Descricao'] = df_calc['Codigo_Limpo'].map(lookup_dict)
-                        df_calc['Descricao_Excel'] = df_calc['Nova_Descricao'].fillna(df_calc['Descricao_Original']).astype(str).str.upper()
-                        
-                        # Captura a Conta 2042 de estoque
-                        mask_2042 = df_calc['Codigo_Limpo'] == '2042'
-                        if mask_2042.any():
-                            saldo_2042 = df_calc.loc[mask_2042, 'Valor_Limpo'].sum()
-                            if abs(saldo_2042) > 0.00: tem_2042_com_saldo = True
-                        
-                        # Aplica filtro principal para conciliação ('449') - Lógica da Ferramenta 2
-                        mask_padrao = df_calc['Codigo_Limpo'].str.startswith('449')
-                        df_dados = df_calc[mask_padrao].copy()
-                        
-                        df_dados['Chave_Vinculo'] = df_dados['Codigo_Limpo'].apply(extrair_chave_vinculo)
-                        df_padrao = df_dados.groupby('Chave_Vinculo').agg({
-                            'Valor_Limpo': 'sum',
-                            'Descricao_Excel': 'first'
-                        }).reset_index()
-                        df_padrao.columns = ['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa']
+                    df_calc = pd.DataFrame()
+                    # Mapeamento Clássico Original (0: Conta, 2: Descrição, 3: Valor)
+                    df_calc['Codigo_Limpo'] = df_data[0].apply(limpar_codigo_bruto)
+                    df_calc['Descricao_Excel'] = df_data[2].astype(str).str.strip().str.upper()
+                    df_calc['Valor_Limpo'] = df_data[3].apply(limpar_valor)
+                    
+                    # Lógica Conta Estoque 2042
+                    mask_2042 = df_calc['Codigo_Limpo'] == '2042'
+                    if mask_2042.any():
+                        saldo_2042 = df_calc.loc[mask_2042, 'Valor_Limpo'].sum()
+                        if abs(saldo_2042) > 0.00: tem_2042_com_saldo = True
+                    
+                    # Filtro Principal ('449')
+                    mask_padrao = df_calc['Codigo_Limpo'].str.startswith('449')
+                    df_dados = df_calc[mask_padrao].copy()
+                    
+                    df_dados['Chave_Vinculo'] = df_dados['Codigo_Limpo'].apply(extrair_chave_vinculo)
+                    df_padrao = df_dados.groupby('Chave_Vinculo').agg({
+                        'Valor_Limpo': 'sum',
+                        'Descricao_Excel': 'first'
+                    }).reset_index()
+                    df_padrao.columns = ['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa']
+                    
                 except Exception as e:
-                    logs.append(f"❌ Erro na leitura Excel da UG {ug}: {e}")
+                    logs.append(f"❌ Erro na leitura do Excel Preparado da UG {ug}: {e}")
 
-                # --- LEITURA DO PDF ---
+                # --- LEITURA DO PDF (Intacta) ---
                 df_pdf_final = pd.DataFrame()
                 dados_pdf = []
                 
@@ -254,7 +285,7 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
                 except Exception as e:
                     logs.append(f"❌ Erro Leitura PDF UG {ug}: {e}")
 
-                # --- COMPARATIVO FINAL ---
+                # --- COMPARATIVO FINAL E DASHBOARD ---
                 if df_padrao.empty: df_padrao = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_Excel', 'Descricao_Completa'])
                 if df_pdf_final.empty: df_pdf_final = pd.DataFrame(columns=['Chave_Vinculo', 'Saldo_PDF'])
 
@@ -281,7 +312,6 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
 
                 if tem_2042_com_saldo:
                     st.warning(f"ℹ️ Conta de Estoque Interno tem saldo: R$ {saldo_2042:,.2f}")
-
                 st.markdown("---")
 
                 # --- GERAÇÃO DO PDF ---
@@ -331,7 +361,7 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
             
             progresso.progress((idx + 1) / len(pares))
 
-        status_text.text("Processamento concluído!")
+        status_text.text("Concluído com sucesso!")
         progresso.empty()
         
         if logs:
@@ -340,6 +370,6 @@ if st.button("▶️ Iniciar Auditoria", use_container_width=True, type="primary
         
         try:
             pdf_bytes = bytes(pdf_out.output())
-            st.download_button("BAIXAR RELATÓRIO FINAL PDF", pdf_bytes, "RELATORIO_FINAL_UNIFICADO.pdf", "application/pdf", type="primary", use_container_width=True)
+            st.download_button("BAIXAR RELATÓRIO FINAL", pdf_bytes, "RELATORIO_FINAL_UNIFICADO.pdf", "application/pdf", type="primary", use_container_width=True)
         except Exception as e:
             st.error(f"Erro ao gerar o PDF: {e}")
