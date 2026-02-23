@@ -16,7 +16,8 @@ st.title("📂 Processador de Planilha de Bens Móveis")
 st.markdown("""
 **Funcionalidades:**
 1. **Processar:** Aplica PROCV (usando MATRIZ.xlsx local), filtros e cores.
-2. **Armazenamento Interno:** Salva cada aba como um arquivo Excel individual na memória do sistema (em vez de baixar o ZIP).
+2. **Armazenamento Interno:** Salva cada aba como um arquivo Excel individual na memória do sistema.
+3. **Visualizador (NOVO):** Permite inspecionar o resultado de cada aba diretamente na tela.
 """)
 
 # --- BARRA LATERAL (UPLOADS) ---
@@ -130,10 +131,8 @@ if st.sidebar.button("Processar Planilhas"):
                 })
 
             st.success(f"✅ Processamento concluído! {len(processed_sheets)} abas foram tratadas.")
-            st.markdown("---")
 
             # --- SALVANDO ARQUIVOS SEPARADOS NA MEMÓRIA INTERNA ---
-            # Limpa o "cofre" de memória para evitar sobreposição de processamentos anteriores
             st.session_state['arquivos_memoria'] = {}
             
             for item in processed_sheets:
@@ -143,16 +142,40 @@ if st.sidebar.button("Processar Planilhas"):
                 
                 single_excel_buffer.seek(0)
                 
-                # Guarda o buffer na memória associado ao nome do arquivo
                 nome_arquivo = f"{item['name']}.xlsx"
                 st.session_state['arquivos_memoria'][nome_arquivo] = single_excel_buffer
 
-            # Aviso de confirmação para o usuário
-            st.success(f"💾 Tudo certo! {len(st.session_state['arquivos_memoria'])} arquivos foram gerados e estão salvos na memória interna.")
-            
-            with st.expander("Ver lista de arquivos gerados na memória"):
-                for nome in st.session_state['arquivos_memoria'].keys():
-                    st.write(f"📄 {nome}")
+            st.success(f"💾 {len(st.session_state['arquivos_memoria'])} arquivos foram salvos na memória interna prontas para conciliação.")
 
         except Exception as e:
             st.error(f"❌ Ocorreu um erro: {e}")
+
+# ==========================================
+# NOVO: VISUALIZADOR DE ARQUIVOS NA MEMÓRIA
+# ==========================================
+if st.session_state.get('arquivos_memoria'):
+    st.markdown("---")
+    st.subheader("👀 Visualizador de Arquivos (Memória Interna)")
+    st.info("Aqui você pode verificar como ficaram as planilhas geradas em memória, antes de enviá-las para a próxima fase.")
+    
+    # Cria uma lista com os nomes dos arquivos armazenados
+    nomes_arquivos = list(st.session_state['arquivos_memoria'].keys())
+    
+    # Caixa de seleção para escolher qual aba/arquivo visualizar
+    arquivo_selecionado = st.selectbox("Selecione a aba que deseja visualizar:", nomes_arquivos)
+    
+    if arquivo_selecionado:
+        # Pega o arquivo da memória
+        buffer = st.session_state['arquivos_memoria'][arquivo_selecionado]
+        
+        # Volta o cursor para o início do arquivo para poder ler
+        buffer.seek(0)
+        
+        # Lê o Excel usando o pandas (header=None para mostrar exatamente como está a planilha bruta)
+        df_visualizacao = pd.read_excel(buffer, header=None)
+        
+        # Devolve o cursor para o início para que o arquivo não fique "gasto" para a próxima etapa
+        buffer.seek(0)
+        
+        # Exibe a tabela na tela
+        st.dataframe(df_visualizacao, use_container_width=True)
